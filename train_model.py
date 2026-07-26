@@ -7,25 +7,41 @@ from torch.utils.data import Dataset, DataLoader
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
+from pathlib import Path # Added for robust subfolder handling
 
-# --- 1. DATA LOADER ---
+# --- 1. DATA LOADER (UPDATED FOR SUBFOLDERS) ---
 class BoneDataset(Dataset):
     def __init__(self, image_dir, mask_dir, transform=None):
-        self.image_dir = image_dir
-        self.mask_dir = mask_dir
-        self.images = os.listdir(image_dir)
+        self.image_dir = Path(image_dir)
+        self.mask_dir = Path(mask_dir)
         self.transform = transform
+        
+        # Recursively find all .bmp files in all subfolders
+        self.image_paths = list(self.image_dir.rglob("*.bmp"))
 
     def __len__(self):
-        return len(self.images)
+        return len(self.image_paths)
 
     def __getitem__(self, idx):
-        img_path = os.path.join(self.image_dir, self.images[idx])
-        mask_path = os.path.join(self.mask_dir, self.images[idx])
+        img_path = self.image_paths[idx]
         
-        # Load one by one to save system RAM
-        image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        # Dynamically reconstruct the equivalent mask path
+        # E.g., data/train/images/dataset_1/001.bmp -> data/train/masks/dataset_1/001.bmp
+        relative_path = img_path.relative_to(self.image_dir)
+        mask_path = self.mask_dir / relative_path
+        
+        # Load the image and mask
+        image = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        
+        # Safety check: Catch missing masks immediately
+        if mask is None:
+            raise FileNotFoundError(
+                f"Missing ground truth mask! \n"
+                f"Image found at: {img_path}\n"
+                f"Expected mask at: {mask_path}\n"
+                f"Ensure your subfolder and file names match perfectly."
+            )
         
         # Binarize mask (0 and 1) for the Tissue Volume envelope
         mask = (mask > 127).astype(np.float32)
