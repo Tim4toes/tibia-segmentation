@@ -1,3 +1,6 @@
+# This script generates Regions of Interest (ROIs) for bone segmentation using a pre-trained U-Net model. 
+# It processes images stored in subfolders, applies necessary transformations, and saves the resulting ROIs while maintaining the original directory structure.
+
 import os
 import cv2
 import numpy as np

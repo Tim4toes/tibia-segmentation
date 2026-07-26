@@ -1,3 +1,6 @@
+# This script trains a U-Net model for bone segmentation using images and masks stored in subfolders.
+# It includes a custom Dataset class that handles subfolder structures, applies augmentations, and saves the trained model for later inference.
+
 import os
 import cv2
 import numpy as np
