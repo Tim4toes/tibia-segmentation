@@ -10,17 +10,59 @@ from torch.utils.data import Dataset, DataLoader
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
-from pathlib import Path # Added for robust subfolder handling
+from pathlib import Path
+import random
 
-# --- 1. DATA LOADER (UPDATED FOR SUBFOLDERS) ---
-class BoneDataset(Dataset):
-    def __init__(self, image_dir, mask_dir, transform=None):
-        self.image_dir = Path(image_dir)
-        self.mask_dir = Path(mask_dir)
-        self.transform = transform
+# --- 1. STRATIFIED SPLITTER ---
+# function scans your images directory and groups your datasets based on the word following 
+# the final underscore (e.g., wildtype). It randomly selects a specified number of datasets 
+# from each group (default is 1) to set aside for the validation "pop quiz," ensuring the 
+# model is always tested on diverse anatomy.
+
+def get_stratified_split(images_base_dir, val_samples_per_group=1):
+    image_dir = Path(images_base_dir)
+    dataset_folders = [f for f in image_dir.iterdir() if f.is_dir()]
+    
+    groups = {}
+    for folder in dataset_folders:
+        # Extracts the text after the last underscore
+        group_name = folder.name.split('_')[-1].lower()
+        if group_name not in groups:
+            groups[group_name] = []
+        groups[group_name].append(folder)
         
-        # Recursively find all .bmp files in all subfolders
-        self.image_paths = list(self.image_dir.rglob("*.bmp"))
+    train_folders = []
+    val_folders = []
+    
+    for group, folders in groups.items():
+        random.shuffle(folders) # Randomize dataset selection
+        
+        # Keep groups with only 1 dataset in the training pool
+        if len(folders) <= val_samples_per_group:
+            print(f"Warning: Group '{group}' only has {len(folders)} dataset(s). Assigning to training.")
+            train_folders.extend(folders)
+        else:
+            val_folders.extend(folders[:val_samples_per_group])
+            train_folders.extend(folders[val_samples_per_group:])
+            
+    print(f"Validation sets selected for testing: {[f.name for f in val_folders]}")
+    return train_folders, val_folders
+
+# --- 2. DATA LOADER ---
+# class prevents your 16GB of system RAM from crashing. Instead of loading every .bmp 
+# into memory at once, it creates a list of file paths. During training, it iteratively 
+# grabs a few images from your hard drive, matches them to their exact ground-truth 
+# mask, processes them, hands them to the GPU, and then clears them from memory.
+
+class BoneDataset(Dataset):
+    def __init__(self, folder_list, mask_base_dir, transform=None):
+        self.mask_base_dir = Path(mask_base_dir)
+        self.transform = transform
+        self.image_paths = []
+        
+        # Collect all .bmp files from the assigned folders
+        for folder in folder_list:
+            self.image_paths.extend(list(folder.rglob("*.bmp")))
 
     def __len__(self):
         return len(self.image_paths)
@@ -28,25 +70,18 @@ class BoneDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
         
-        # Dynamically reconstruct the equivalent mask path
-        # E.g., data/train/images/dataset_1/001.bmp -> data/train/masks/dataset_1/001.bmp
-        relative_path = img_path.relative_to(self.image_dir)
-        mask_path = self.mask_dir / relative_path
+        # Match the image to its exact mask in the masks directory
+        folder_name = img_path.parent.name
+        file_name = img_path.name
+        mask_path = self.mask_base_dir / folder_name / file_name
         
-        # Load the image and mask
         image = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
         mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
         
-        # Safety check: Catch missing masks immediately
         if mask is None:
-            raise FileNotFoundError(
-                f"Missing ground truth mask! \n"
-                f"Image found at: {img_path}\n"
-                f"Expected mask at: {mask_path}\n"
-                f"Ensure your subfolder and file names match perfectly."
-            )
-        
-        # Binarize mask (0 and 1) for the Tissue Volume envelope
+             raise FileNotFoundError(f"Missing mask for {img_path}")
+                
+        # Binarize mask for Tissue Volume envelope (0 = background, 1 = bone ROI)
         mask = (mask > 127).astype(np.float32)
 
         if self.transform:
@@ -55,6 +90,13 @@ class BoneDataset(Dataset):
             mask = augmentations['mask']
             
         return image, mask
+
+# --- 3. IMAGE AUGMENTATIONS ---
+# instructions tell Albumentations how to modify the images on the fly. train_transform 
+# shrinks the image to fit your GPU, randomly rotates it, and flips it to artificially 
+# multiply your training data. val_transform only shrinks and normalizes the image, 
+# ensuring the validation test is performed on an unaltered, "clean" scan.
+
 
 # Resize to 512x512 to save VRAM, plus augmentations
 train_transform = A.Compose([
@@ -65,7 +107,18 @@ train_transform = A.Compose([
     ToTensorV2(),
 ])
 
-# --- 2. U-NET MODEL ---
+val_transform = A.Compose([
+    A.Resize(512, 512),
+    A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0), 
+    ToTensorV2(),
+])
+
+# --- 4. U-NET ARCHITECTURE ---
+# defines the structural "brain" of the neural network. The encoder (downs) shrinks 
+# the image to locate bone context, the bottleneck processes the densest features, and 
+# the decoder (ups) expands the image back out to draw precise pixel boundaries using 
+# skip connections.
+
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -116,26 +169,54 @@ class UNet(nn.Module):
 
         return self.final_conv(x)
 
-# --- 3. TRAINING LOOP ---
-def train_model():
+# --- 5. TRAINING LOOP ---
+# central command block that orchestrates everything. It triggers the data splitter, 
+# initializes the GPU (utilizing mixed precision autocast to maximize your RTX 3090's 
+# memory), runs the training pass, runs the validation test pass, and saves the .pth 
+# weights only if the validation score has improved.
+
+def train_model(resume_training=False, epochs=50):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = UNet().to(device)
+    model_path = "tibia_unet.pth"
     
-    dataset = BoneDataset(image_dir="data/train/images", mask_dir="data/train/masks", transform=train_transform)
-    # Batch size of 4 is safe for 512x512 images on a 24GB RTX 3090
-    loader = DataLoader(dataset, batch_size=4, shuffle=True) 
+    # Check if we are fine-tuning an existing model or starting fresh
+    if resume_training and os.path.exists(model_path):
+        print(f"Loading existing model weights...")
+        model.load_state_dict(torch.load(model_path))
+        learning_rate = 1e-5
+    else:
+        print("Starting training from a blank slate...")
+        learning_rate = 1e-4
+
+    # Execute the stratified split
+    images_base = "data/all_datasets/images"
+    masks_base = "data/all_datasets/masks"
+    train_folders, val_folders = get_stratified_split(images_base)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    # Initialize the data loaders
+    train_dataset = BoneDataset(train_folders, masks_base, transform=train_transform)
+    val_dataset = BoneDataset(val_folders, masks_base, transform=val_transform)
+    
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
+    
+    # Set up math optimizers
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.BCEWithLogitsLoss()
-    scaler = torch.cuda.amp.GradScaler() # Mixed precision to save VRAM
+    scaler = torch.cuda.amp.GradScaler() 
     
-    epochs = 20
-    print("Starting training...")
+    best_val_loss = float('inf') 
     
     for epoch in range(epochs):
+        print(f"\n--- Epoch {epoch+1}/{epochs} ---")
+        
+        # --- TRAINING PHASE ---
         model.train()
-        loop = tqdm(loader)
-        for batch_idx, (data, targets) in enumerate(loop):
+        train_loss = 0
+        loop = tqdm(train_loader, desc="Training")
+        
+        for data, targets in loop:
             data = data.to(device)
             targets = targets.float().unsqueeze(1).to(device)
             
@@ -148,10 +229,34 @@ def train_model():
             scaler.step(optimizer)
             scaler.update()
             
+            train_loss += loss.item()
             loop.set_postfix(loss=loss.item())
             
-    torch.save(model.state_dict(), "tibia_unet.pth")
-    print("Model saved to tibia_unet.pth")
+        avg_train_loss = train_loss / len(train_loader)
+        
+        # --- VALIDATION PHASE (The Pop Quiz) ---
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for data, targets in val_loader:
+                data = data.to(device)
+                targets = targets.float().unsqueeze(1).to(device)
+                
+                with torch.cuda.amp.autocast():
+                    predictions = model(data)
+                    loss = criterion(predictions, targets)
+                    
+                val_loss += loss.item()
+                
+        avg_val_loss = val_loss / len(val_loader)
+        print(f"Avg Train Loss: {avg_train_loss:.4f} | Avg Val Loss: {avg_val_loss:.4f}")
+        
+        # --- BEST MODEL SAVING ---
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), model_path)
+            print(f"*** New best model saved! (Val Loss: {best_val_loss:.4f}) ***")
 
+# Entry point to execute the script
 if __name__ == "__main__":
-    train_model()
+    train_model(resume_training=False, epochs=50)
