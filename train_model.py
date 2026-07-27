@@ -206,7 +206,7 @@ def train_model(resume_training=False, epochs=50):
     criterion = nn.BCEWithLogitsLoss()
     scaler = torch.cuda.amp.GradScaler() 
     
-    best_val_loss = float('inf') 
+    best_loss = float('inf') 
     
     for epoch in range(epochs):
         print(f"\n--- Epoch {epoch+1}/{epochs} ---")
@@ -248,14 +248,22 @@ def train_model(resume_training=False, epochs=50):
                     
                 val_loss += loss.item()
                 
-        avg_val_loss = val_loss / len(val_loader)
-        print(f"Avg Train Loss: {avg_train_loss:.4f} | Avg Val Loss: {avg_val_loss:.4f}")
+# Check if validation data exists to prevent ZeroDivisionError
+        if len(val_loader) > 0:
+            avg_val_loss = val_loss / len(val_loader)
+            print(f"Avg Train Loss: {avg_train_loss:.4f} | Avg Val Loss: {avg_val_loss:.4f}")
+            current_eval_loss = avg_val_loss
+            loss_type = "Val Loss"
+        else:
+            print(f"Avg Train Loss: {avg_train_loss:.4f} | (No validation data available)")
+            current_eval_loss = avg_train_loss
+            loss_type = "Train Loss"
         
         # --- BEST MODEL SAVING ---
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        if current_eval_loss < best_loss:
+            best_loss = current_eval_loss
             torch.save(model.state_dict(), model_path)
-            print(f"*** New best model saved! (Val Loss: {best_val_loss:.4f}) ***")
+            print(f"*** New best model saved! ({loss_type}: {best_loss:.4f}) ***")
 
 # Entry point to execute the script
 if __name__ == "__main__":
