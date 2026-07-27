@@ -1,0 +1,12 @@
+# Ignore the data folders and all images/masks inside them
+data/
+
+# Ignore the virtual environment
+venv/
+
+# Ignore PyTorch model weight files
+*.pth
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
