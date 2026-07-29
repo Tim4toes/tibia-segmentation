@@ -29,7 +29,7 @@ def generate_rois():
     
     # Transform for inference (resizing to match training constraints)
     infer_transform = A.Compose([
-        A.Resize(512, 512),
+        A.Resize(1024, 1024),
         A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0),
         ToTensorV2(),
     ])

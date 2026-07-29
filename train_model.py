@@ -100,7 +100,7 @@ class BoneDataset(Dataset):
 
 # Resize to 512x512 to save VRAM, plus augmentations
 train_transform = A.Compose([
-    A.Resize(512, 512),
+    A.Resize(1024, 1024),
     A.Rotate(limit=35, p=0.8),
     A.HorizontalFlip(p=0.5),
     A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0), 
@@ -108,7 +108,7 @@ train_transform = A.Compose([
 ])
 
 val_transform = A.Compose([
-    A.Resize(512, 512),
+    A.Resize(1024, 1024),
     A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0), 
     ToTensorV2(),
 ])
@@ -198,8 +198,8 @@ def train_model(resume_training=False, epochs=50):
     train_dataset = BoneDataset(train_folders, masks_base, transform=train_transform)
     val_dataset = BoneDataset(val_folders, masks_base, transform=val_transform)
     
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False)
     
     # Set up math optimizers
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
