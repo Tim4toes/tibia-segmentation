@@ -2,15 +2,22 @@
 # It processes images stored in subfolders, applies necessary transformations, and saves the resulting ROIs while maintaining the original directory structure.
 
 import os
+from xml.parsers.expat import model
 import cv2
 import numpy as np
 import torch
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from pathlib import Path
+from tqdm import tqdm
 from train_model import UNet # Imports your architecture
 
 def generate_rois():
+    # --- MODEL INITIALISATION ---
+    # Detects your RTX 3090, builds the UNet brain, and loads the weights you just 
+    # trained. model.eval() locks the network so it doesn't accidentally try to 
+    # learn from or alter its weights based on this new data.
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = UNet().to(device)
     
@@ -23,6 +30,10 @@ def generate_rois():
     model.load_state_dict(torch.load(model_weights_path))
     model.eval()
 
+    # --- DIRECTORY AND TRANSFORM SETUP ---
+    # Defines where data comes from and goes to. The infer_transform forces every 
+    # incoming image to exactly 1024x1024 (matching your training size) and normalises 
+    # the pixel brightness so the math behaves predictably.
     # Define base directories using Pathlib for easy path manipulation
     input_dir = Path("data/new_scans/")
     output_dir = Path("data/output_rois/")
@@ -34,6 +45,8 @@ def generate_rois():
         ToTensorV2(),
     ])
 
+    # --- FILE DISCOVERY ---
+    # Scans the new_scans folder and all its subfolders for .bmp files.
     print(f"Scanning for .bmp files in {input_dir}...")
     image_paths = list(input_dir.rglob("*.bmp"))
     
@@ -42,8 +55,12 @@ def generate_rois():
         return
 
     print(f"Generating ROIs for {len(image_paths)} images...")
-    
-    for img_path in image_paths:
+
+
+    # --- THE INFERENCE LOOP ---
+    # Wraps the loop in tqdm so you get a live progress bar and time estimate.
+    for img_path in tqdm(image_paths, desc="Processing Images"):
+
         # 1. Reconstruct the directory structure for the output
         # E.g., data/new_scans/dataset_3/001.bmp -> dataset_3/001.bmp
         relative_path = img_path.relative_to(input_dir)
@@ -51,31 +68,33 @@ def generate_rois():
         
         # Ensure the destination subfolder exists (creates it if it doesn't)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Keep the exact same filename as the input image for CT Analyser alignment
-        final_out_path = out_path
-
-        # 2. Load the original image to get its exact dimensions
+     
+        # 2. Loads the raw image to capture its true, native resolution (e.g., 2752x2752)
         original_img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
         original_height, original_width = original_img.shape
 
         # 3. Apply transforms and move to GPU
+        # Shrinks the image to 1024x1024 and converts it to a PyTorch tensor
         augmented = infer_transform(image=original_img)
         img_tensor = augmented['image'].unsqueeze(0).to(device)
 
-        # 4. Generate the prediction
+        # 4. AI Prediction
+        # Uses autocast to process the math faster. The model outputs a raw probability 
+        # map (values between 0 and 1) representing its confidence that a pixel is bone.
+        # Generate the prediction
         with torch.no_grad():
-            prediction = model(img_tensor)
-            prob_mask = torch.sigmoid(prediction).squeeze().cpu().numpy()
+            with torch.amp.autocast('cuda'):
+                prediction = model(img_tensor)
+                prob_mask_1024 = torch.sigmoid(prediction).squeeze().cpu().numpy()
 
         # 5. Binarize the prediction (strict 0 or 255)
-        binary_mask_512 = (prob_mask > 0.5).astype(np.uint8) * 255
+        binary_mask_512 = (prob_mask_1024 > 0.5).astype(np.uint8) * 255
 
         # 6. Resize back to original dimensions using NEAREST to prevent grey pixels
         final_roi = cv2.resize(binary_mask_512, (original_width, original_height), interpolation=cv2.INTER_NEAREST)
 
         # 7. Save the file
-        cv2.imwrite(str(final_out_path), final_roi)
+        cv2.imwrite(str(out_path), final_roi)
         
     print(f"Success! All {len(image_paths)} ROIs generated and mirrored seamlessly in {output_dir}")
 

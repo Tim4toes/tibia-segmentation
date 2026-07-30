@@ -198,13 +198,13 @@ def train_model(resume_training=False, epochs=50):
     train_dataset = BoneDataset(train_folders, masks_base, transform=train_transform)
     val_dataset = BoneDataset(val_folders, masks_base, transform=val_transform)
     
-    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=5, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=5, shuffle=False)
     
     # Set up math optimizers
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.BCEWithLogitsLoss()
-    scaler = torch.cuda.amp.GradScaler() 
+    scaler = torch.amp.GradScaler('cuda') 
     
     best_loss = float('inf') 
     
@@ -220,7 +220,7 @@ def train_model(resume_training=False, epochs=50):
             data = data.to(device)
             targets = targets.float().unsqueeze(1).to(device)
             
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 predictions = model(data)
                 loss = criterion(predictions, targets)
                 
@@ -242,7 +242,7 @@ def train_model(resume_training=False, epochs=50):
                 data = data.to(device)
                 targets = targets.float().unsqueeze(1).to(device)
                 
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     predictions = model(data)
                     loss = criterion(predictions, targets)
                     
