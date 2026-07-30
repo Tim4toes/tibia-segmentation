@@ -2,6 +2,7 @@
 # It processes images stored in subfolders, applies necessary transformations, and saves the resulting ROIs while maintaining the original directory structure.
 
 import os
+from tkinter import Image
 from xml.parsers.expat import model
 import cv2
 import numpy as np
@@ -11,6 +12,7 @@ from albumentations.pytorch import ToTensorV2
 from pathlib import Path
 from tqdm import tqdm
 from train_model import UNet # Imports your architecture
+from PIL import Image
 
 def generate_rois():
     # --- MODEL INITIALISATION ---
@@ -88,13 +90,15 @@ def generate_rois():
                 prob_mask_1024 = torch.sigmoid(prediction).squeeze().cpu().numpy()
 
         # 5. Binarize the prediction (strict 0 or 255)
-        binary_mask_512 = (prob_mask_1024 > 0.5).astype(np.uint8) * 255
+        binary_mask_1024 = (prob_mask_1024 > 0.5).astype(np.uint8) * 255
 
         # 6. Resize back to original dimensions using NEAREST to prevent grey pixels
-        final_roi = cv2.resize(binary_mask_512, (original_width, original_height), interpolation=cv2.INTER_NEAREST)
+        final_roi_8bit = cv2.resize(binary_mask_1024, (original_width, original_height), interpolation=cv2.INTER_NEAREST)
 
-        # 7. Save the file
-        cv2.imwrite(str(out_path), final_roi)
+        # 7. Save as true 1-Bit Monochrome using Pillow
+        # Forces the 8-bit array into strict 1-bit format so CT Analyser can read it
+        final_roi_img = Image.fromarray(final_roi_8bit).convert('1')
+        final_roi_img.save(str(out_path))
         
     print(f"Success! All {len(image_paths)} ROIs generated and mirrored seamlessly in {output_dir}")
 
