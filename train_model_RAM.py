@@ -76,6 +76,13 @@ class BoneDataset(Dataset):
             # Read from the hard drive
             image = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
             mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+
+            # --- THE RAM SAVER ---
+            # Shrink to 1024x1024 BEFORE putting it in RAM.
+            # We use INTER_AREA for the image (preserves bone detail when shrinking)
+            # We use INTER_NEAREST for the mask (prevents gray pixels along the edges)
+            image = cv2.resize(image, (1024, 1024), interpolation=cv2.INTER_AREA)
+            mask = cv2.resize(mask, (1024, 1024), interpolation=cv2.INTER_NEAREST)
             
             # Ensure the mask is perfectly binarized to 0.0 or 1.0 
             # (Just in case CT Analyser left any artifacts)
