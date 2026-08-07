@@ -209,7 +209,7 @@ def train_model(resume_training=False, epochs=50):
         learning_rate = 1e-4
 
     # Execute the stratified split
-    images_base = "data/all_datasets/images"
+    images_base = "data/all_datasets/images_gs"
     masks_base = "data/all_datasets/masks"
     train_folders, val_folders = get_stratified_split(images_base)
     
