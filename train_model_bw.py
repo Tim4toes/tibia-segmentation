@@ -1,8 +1,12 @@
-# This script trains a U-Net model for bone segmentation using images and masks stored in subfolders.
+# This script trains an Attention U-Net model for black-and-white bone segmentation.
 # It includes a custom Dataset class that handles subfolder structures, applies augmentations, and saves the trained model for later inference.
+# It includes GPU-accelerated overlap metrics (DSC, IoU, Sens, Prec) every epoch,
+# and calculates CPU-intensive HD95 strictly when a new best model is saved (Strategy A).
 
 import os
+from pyexpat import model
 import cv2
+import csv
 import numpy as np
 import torch
 import torch.nn as nn
@@ -12,6 +16,7 @@ from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
 from pathlib import Path
 import random
+from medpy.metric.binary import hd95
 
 # --- 1. STRATIFIED SPLITTER ---
 # function scans your images directory and groups your datasets based on the word following 
@@ -97,8 +102,7 @@ class BoneDataset(Dataset):
 # multiply your training data. val_transform only shrinks and normalizes the image, 
 # ensuring the validation test is performed on an unaltered, "clean" scan.
 
-
-# Resize to 512x512 to save VRAM, plus augmentations
+# Resize to 1024x1024 to save VRAM, plus augmentations
 train_transform = A.Compose([
     # Force nearest-neighbor interpolation to prevent gray edge artifacts
     A.Resize(1024, 1024, interpolation=cv2.INTER_NEAREST),
@@ -120,7 +124,7 @@ val_transform = A.Compose([
     ToTensorV2(),
 ])
 
-# --- 4. U-NET ARCHITECTURE ---
+# --- 4. ATTENTION U-NET ARCHITECTURE ---
 # defines the structural "brain" of the neural network. The encoder (downs) shrinks 
 # the image to locate bone context, the bottleneck processes the densest features, and 
 # the decoder (ups) expands the image back out to draw precise pixel boundaries using 
@@ -140,26 +144,67 @@ class DoubleConv(nn.Module):
     def forward(self, x):
         return self.conv(x)
 
+class AttentionGate(nn.Module):
+    # Acts as a filter. It uses the gating signal (g) from the decoder to 
+    # highlight the important features in the spatial map (x) from the encoder, 
+    # suppressing irrelevant background structures.
+    
+    def __init__(self, F_g, F_l, F_int):
+        super(AttentionGate, self).__init__()
+        self.W_g = nn.Sequential(
+            nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.BatchNorm2d(F_int)
+        )
+        self.W_x = nn.Sequential(
+            nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.BatchNorm2d(F_int)
+        )
+        self.psi = nn.Sequential(
+            nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.BatchNorm2d(1),
+            nn.Sigmoid()
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, g, x):
+        g1 = self.W_g(g)
+        x1 = self.W_x(x)
+        # Combine the signals and apply activation
+        psi = self.relu(g1 + x1)
+        # Generate the attention coefficients (values between 0 and 1)
+        psi = self.psi(psi)
+        # Multiply the spatial map by the coefficients to mute irrelevant areas
+        return x * psi
+
 class UNet(nn.Module):
     def __init__(self, in_channels=1, out_channels=1, features=[64, 128, 256, 512]):
         super(UNet, self).__init__()
         self.ups = nn.ModuleList()
         self.downs = nn.ModuleList()
+        self.ag = nn.ModuleList() # Attention Gates
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
+        # Encoder (Downsampling)
         for feature in features:
             self.downs.append(DoubleConv(in_channels, feature))
             in_channels = feature
 
+        # Decoder (Upsampling)
         for feature in reversed(features):
+            # Upsample the image
             self.ups.append(nn.ConvTranspose2d(feature*2, feature, kernel_size=2, stride=2))
+            # Convolutions after concatenation
             self.ups.append(DoubleConv(feature*2, feature))
+            # Initialize the Attention Gate for this specific tier
+            self.ag.append(AttentionGate(F_g=feature, F_l=feature, F_int=feature // 2))
 
         self.bottleneck = DoubleConv(features[-1], features[-1]*2)
         self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
 
     def forward(self, x):
         skip_connections = []
+
+        # --- ENCODER PATH ---
         for down in self.downs:
             x = down(x)
             skip_connections.append(x)
@@ -168,13 +213,37 @@ class UNet(nn.Module):
         x = self.bottleneck(x)
         skip_connections = skip_connections[::-1]
 
+
+        # --- DECODER PATH WITH ATTENTION ---
         for idx in range(0, len(self.ups), 2):
-            x = self.ups[idx](x)
+            # 1. Upsample the current feature map (this is our gating signal)
+            g = self.ups[idx](x) 
+            # 2. Grab the corresponding skip connection from the encoder
             skip_connection = skip_connections[idx//2]
-            concat_skip = torch.cat((skip_connection, x), dim=1)
+            # 3. Pass both through the Attention Gate
+            x_attended = self.ag[idx//2](g=g, x=skip_connection)
+            # 4. Concatenate the filtered spatial map with the gating signal
+            concat_skip = torch.cat((x_attended, g), dim=1)
+            # 5. Process through the DoubleConv block
             x = self.ups[idx+1](concat_skip)
 
         return self.final_conv(x)
+
+# --- 4.5 EVALUATION METRICS ---
+def calculate_metrics(pred_logits, true_masks):
+    # Only calculate the fast GPU overlap metrics here
+    preds = (torch.sigmoid(pred_logits) > 0.5).float()
+    
+    TP = (preds * true_masks).sum()
+    FP = ((preds == 1) & (true_masks == 0)).sum()
+    FN = ((preds == 0) & (true_masks == 1)).sum()
+    
+    dsc = (2. * TP) / (2. * TP + FP + FN + 1e-6)
+    iou = TP / (TP + FP + FN + 1e-6)
+    sensitivity = TP / (TP + FN + 1e-6)
+    precision = TP / (TP + FP + 1e-6)
+            
+    return dsc.item(), iou.item(), sensitivity.item(), precision.item()
 
 # --- 5. TRAINING LOOP ---
 # central command block that orchestrates everything. It triggers the data splitter, 
@@ -185,7 +254,7 @@ class UNet(nn.Module):
 def train_model(resume_training=False, epochs=50):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = UNet().to(device)
-    model_path = "tibia_unet.pth"
+    model_path = "tibia_unet_bw.pth"
     
     # Check if we are fine-tuning an existing model or starting fresh
     if resume_training and os.path.exists(model_path):
@@ -197,14 +266,15 @@ def train_model(resume_training=False, epochs=50):
         learning_rate = 1e-4
 
     # Execute the stratified split
-    images_base = "data/all_datasets/images"
+    images_base = "data/all_datasets/images_bw"
     masks_base = "data/all_datasets/masks"
     train_folders, val_folders = get_stratified_split(images_base)
     
     # Initialize the data loaders
     train_dataset = BoneDataset(train_folders, masks_base, transform=train_transform)
     val_dataset = BoneDataset(val_folders, masks_base, transform=val_transform)
-    
+
+    # can increase or decrease batch size to increase or decrease strain on GPU
     train_loader = DataLoader(train_dataset, batch_size=5, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=5, shuffle=False)
     
@@ -244,6 +314,12 @@ def train_model(resume_training=False, epochs=50):
         # --- VALIDATION PHASE (The Pop Quiz) ---
         model.eval()
         val_loss = 0
+        val_metrics = {"dsc": 0, "iou": 0, "sens": 0, "prec": 0}
+        
+        # Cache for HD95 calculation to prevent a second GPU forward pass
+        stored_preds = []
+        stored_targets = []
+        
         with torch.no_grad():
             for data, targets in val_loader:
                 data = data.to(device)
@@ -255,10 +331,27 @@ def train_model(resume_training=False, epochs=50):
                     
                 val_loss += loss.item()
                 
+                # Fast GPU metric evaluation
+                dsc, iou, sens, prec = calculate_metrics(predictions, targets)
+                val_metrics["dsc"] += dsc
+                val_metrics["iou"] += iou
+                val_metrics["sens"] += sens
+                val_metrics["prec"] += prec
+                
+                # Store lightweight binary arrays in CPU RAM
+                stored_preds.append((torch.sigmoid(predictions) > 0.5).cpu().numpy())
+                stored_targets.append(targets.cpu().numpy())
+                
 # Check if validation data exists to prevent ZeroDivisionError
         if len(val_loader) > 0:
             avg_val_loss = val_loss / len(val_loader)
-            print(f"Avg Train Loss: {avg_train_loss:.4f} | Avg Val Loss: {avg_val_loss:.4f}")
+            avg_dsc = val_metrics["dsc"] / len(val_loader)
+            avg_iou = val_metrics["iou"] / len(val_loader)
+            avg_sens = val_metrics["sens"] / len(val_loader)
+            avg_prec = val_metrics["prec"] / len(val_loader)
+            print(f"Loss: Train {avg_train_loss:.4f} | Val {avg_val_loss:.4f}")
+            print(f"Validation Metrics: DSC {avg_dsc:.4f} | IoU {avg_iou:.4f} | Sens {avg_sens:.4f} | Prec {avg_prec:.4f}")
+            
             current_eval_loss = avg_val_loss
             loss_type = "Val Loss"
         else:
@@ -266,11 +359,48 @@ def train_model(resume_training=False, epochs=50):
             current_eval_loss = avg_train_loss
             loss_type = "Train Loss"
         
-        # --- BEST MODEL SAVING ---
+        # --- BEST MODEL CHECKPOINT/SAVING AND HD95 COMPUTATION ---
         if current_eval_loss < best_loss:
             best_loss = current_eval_loss
             torch.save(model.state_dict(), model_path)
-            print(f"*** New best model saved! ({loss_type}: {best_loss:.4f}) ***")
+
+            # Compute HD95 exclusively when a new best checkpoint is achieved
+            print(f"*** New best model found! Calculating HD95 across validation set... ***")
+            hd95_scores = []
+            # Iterate through the arrays we already saved in memory
+            for batch_preds, batch_targets in zip(stored_preds, stored_targets):
+                for i in range(batch_preds.shape[0]):
+                    p = batch_preds[i].squeeze()
+                    t = batch_targets[i].squeeze()
+                    if p.max() > 0 and t.max() > 0:
+                        hd95_scores.append(hd95(p, t))
+                        
+            avg_hd95 = np.mean(hd95_scores) if len(hd95_scores) > 0 else float('nan')
+            print(f"*** Best Model Saved ({loss_type}: {best_loss:.4f}) | HD95: {avg_hd95:.2f} px ***")
+
+            # --- NEW: APPEND METRICS TO CSV ---
+            csv_path = "training_metrics_bw.csv"
+            file_exists = os.path.isfile(csv_path)
+            
+            with open(csv_path, mode='a', newline='') as csvfile:
+                fieldnames = ['Epoch', 'Train_Loss', 'Val_Loss', 'DSC', 'IoU', 'Sensitivity', 'Precision', 'HD95']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                
+                # Write the header only if the file is being created for the first time
+                if not file_exists:
+                    writer.writeheader()
+                    
+                # Append the new row of data for this best model
+                writer.writerow({
+                    'Epoch': epoch + 1,
+                    'Train_Loss': f"{avg_train_loss:.4f}",
+                    'Val_Loss': f"{best_loss:.4f}",
+                    'DSC': f"{avg_dsc:.4f}",
+                    'IoU': f"{avg_iou:.4f}",
+                    'Sensitivity': f"{avg_sens:.4f}",
+                    'Precision': f"{avg_prec:.4f}",
+                    'HD95': f"{avg_hd95:.2f}"
+                })
 
 # Entry point to execute the script
 if __name__ == "__main__":
