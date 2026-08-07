@@ -37,8 +37,8 @@ def generate_rois():
     # incoming image to exactly 1024x1024 (matching your training size) and normalises 
     # the pixel brightness so the math behaves predictably.
     # Define base directories using Pathlib for easy path manipulation
-    input_dir = Path("data/new_scans/")
-    output_dir = Path("data/output_rois/")
+    input_dir = Path("data/inference/input_gs/")
+    output_dir = Path("data/inference/output_gs/")
     
     # Transform for inference (resizing to match training constraints)
     infer_transform = A.Compose([
