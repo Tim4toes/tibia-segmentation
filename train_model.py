@@ -98,18 +98,30 @@ class BoneDataset(Dataset):
 # ensuring the validation test is performed on an unaltered, "clean" scan.
 
 
-# Resize to 512x512 to save VRAM, plus augmentations
+# Resize to 1024x1024 to save VRAM, plus augmentations
 train_transform = A.Compose([
     A.Resize(1024, 1024),
     A.Rotate(limit=35, p=0.8),
     A.HorizontalFlip(p=0.5),
-    A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0), 
+
+# --- NEW 2D TEXTURAL AUGMENTATIONS ---
+    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+    A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+
+    # Z-Score Normalization (Replace placeholders [GLOBAL_MEAN] and [GLOBAL_STD] with calculated values - avergae pixel brightness (mean) and variance (standard deviation) accross all datasets. 
+    # This ensures the model sees a consistent range of pixel values during training and inference.)
+    A.Normalize(mean=[0.0330], std=[0.0726], max_pixel_value=255.0),
+
+    # If there is no global mean or std data, use the below code
+    # A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0), 
     ToTensorV2(),
 ])
 
 val_transform = A.Compose([
     A.Resize(1024, 1024),
-    A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0), 
+    A.Normalize(mean=[0.0330], std=[0.0726], max_pixel_value=255.0), 
+    # If there is no global mean or std data, use the below code
+    # A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0), 
     ToTensorV2(),
 ])
 
