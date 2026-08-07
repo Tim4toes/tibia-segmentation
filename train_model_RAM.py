@@ -121,7 +121,6 @@ class BoneDataset(Dataset):
 
 # Resize to 512x512 to save VRAM, plus augmentations
 train_transform = A.Compose([
-    A.Resize(1024, 1024),
     A.Rotate(limit=35, p=0.8),
     A.HorizontalFlip(p=0.5),
     A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0), 
@@ -129,7 +128,6 @@ train_transform = A.Compose([
 ])
 
 val_transform = A.Compose([
-    A.Resize(1024, 1024),
     A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0), 
     ToTensorV2(),
 ])
