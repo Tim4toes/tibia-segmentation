@@ -24,10 +24,17 @@ def generate_rois():
     # Check if the trained model exists before trying to load it
     model_weights_path = "tibia_unet_bw.pth"
     if not os.path.exists(model_weights_path):
-        print(f"Error: Could not find {model_weights_path}. Run train_model.py first.")
+        print(f"Error: Could not find {model_weights_path}. Run train_model_bw.py first.")
         return
         
-    model.load_state_dict(torch.load(model_weights_path))
+    # --- CRITICAL FIX: Extract weights from the new dictionary checkpoint format ---
+    checkpoint = torch.load(model_weights_path)
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        # Backwards compatibility in case you load an older weights-only file
+        model.load_state_dict(checkpoint)
+
     model.eval()
 
     # --- DIRECTORY AND TRANSFORM SETUP ---
@@ -40,7 +47,7 @@ def generate_rois():
     
     # Transform for inference (resizing to match training constraints)
     infer_transform = A.Compose([
-        A.Resize(1024, 1024, interpolation=cv2.INTER_NEAREST),
+        A.Resize(960, 960, interpolation=cv2.INTER_NEAREST),
         A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0),
         ToTensorV2(),
     ])

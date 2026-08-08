@@ -114,7 +114,7 @@ class BoneDataset(Dataset):
 # Resize to 1024x1024 to save VRAM, plus augmentations
 train_transform = A.Compose([
     # Force nearest-neighbor interpolation to prevent gray edge artifacts
-    A.Resize(1024, 1024, interpolation=cv2.INTER_NEAREST),
+    A.Resize(960, 960, interpolation=cv2.INTER_NEAREST),
     # Original spatial augmentations using nearest-neighbor
     A.Rotate(limit=35, p=0.8, interpolation=cv2.INTER_NEAREST),
     A.HorizontalFlip(p=0.5),
@@ -128,7 +128,7 @@ train_transform = A.Compose([
 
 val_transform = A.Compose([
     # Ensure validation scans are also resized without introducing gray artifacts
-    A.Resize(1024, 1024, interpolation=cv2.INTER_NEAREST),
+    A.Resize(960,960, interpolation=cv2.INTER_NEAREST),
     A.Normalize(mean=[0.5], std=[0.5], max_pixel_value=255.0), 
     ToTensorV2(),
 ])
@@ -342,8 +342,8 @@ def train_model(run_mode="new", epochs=50):
     val_dataset = BoneDataset(val_folders, masks_base, transform=val_transform)
 
     # can increase or decrease batch size to increase or decrease strain on GPU
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=5, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=3, pin_memory=True, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=5, shuffle=True, num_workers=5, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=5, shuffle=False, num_workers=3, pin_memory=True, persistent_workers=True)
     
     # Set up math optimizers
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
