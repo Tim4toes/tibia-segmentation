@@ -3,6 +3,9 @@
 # It includes GPU-accelerated overlap metrics (DSC, IoU, Sens, Prec) every epoch,
 # and calculates CPU-intensive HD95 strictly when a new best model is saved (Strategy A).
 
+# See instructions at end of script and in README.md for how to run the three training modes: 
+# new, resume, and finetune.
+
 import os
 import cv2
 import csv
@@ -13,6 +16,7 @@ from torch.utils.data import Dataset, DataLoader
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
+import argparse
 from pathlib import Path
 import random
 from medpy.metric.binary import hd95
@@ -276,11 +280,10 @@ def calculate_metrics(pred_logits, true_masks,compute_hd95=False):
 # memory), runs the training pass, runs the validation test pass, and saves the .pth 
 # weights only if the validation score has improved.
 
-def train_model(run_mode="new", epochs=50): 
+def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path):
     # run_mode options: "new", "resume", or "finetune"
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = UNet().to(device)
-    model_path = "tibia_unet_bw.pth"
     
     start_epoch = 0
     best_loss = float('inf')
@@ -326,10 +329,6 @@ def train_model(run_mode="new", epochs=50):
         learning_rate = 1e-4
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         scaler = torch.amp.GradScaler('cuda')
-
-    # --- EXECUTE THE SPLIT ---
-    images_base = "data/all_datasets/images_bw"
-    masks_base = "data/all_datasets/masks"
 
     # Pass the forced_val_folders to the splitter (will be None if "new")
     train_folders, val_folders = get_stratified_split(images_base, forced_val_folders=forced_val_folders)
@@ -461,7 +460,6 @@ def train_model(run_mode="new", epochs=50):
             print(f"*** Best Model Saved ({loss_type}: {best_loss:.4f}) | HD95: {avg_hd95:.2f} px ***")
 
             # --- NEW: APPEND METRICS TO CSV ---
-            csv_path = "training_metrics_bw.csv"
             file_exists = os.path.isfile(csv_path)
             
             with open(csv_path, mode='a', newline='') as csvfile:
@@ -486,10 +484,80 @@ def train_model(run_mode="new", epochs=50):
 
 # Entry point to execute the script
 if __name__ == "__main__":
-    train_model(resume_training=False, epochs=50)
+    # 1. Initialize the parser
+    parser = argparse.ArgumentParser(description="Train Attention U-Net for Bone Segmentation")
+    
+    # 2. Add an argument for the anatomical target
+    parser.add_argument(
+        "--target", 
+        type=str, 
+        required=True, 
+        choices=["tibia", "cortical", "trabecular"],
+        help="Select the biological target to segment."
+    )
+    
+    # 3. Add an argument for the training mode (defaulting to 'new')
+    parser.add_argument(
+        "--mode", 
+        type=str, 
+        default="new", 
+        choices=["new", "resume", "finetune"],
+        help="Select the training mode: new (scratch), resume (continue), or finetune (add data)."
+    )
+    
+    # 4. Parse the commands entered in the terminal
+    args = parser.parse_args()
+    
+    # 5. Route the paths based on the chosen target
+    if args.target == "tibia":
+        model_path = "checkpoints/tibia_unet_bw.pth"
+        images_base = "data/macro_tibia/images_bw"
+        masks_base = "data/macro_tibia/masks_tibia"
+        csv_path = "logs/metrics_tibia.csv"
+        
+    elif args.target == "cortical":
+        model_path = "checkpoints/cortical_unet_bw.pth"
+        images_base = "data/tibia_voi/images_bw"
+        masks_base = "data/tibia_voi/masks_cortical_bw"
+        csv_path = "logs/metrics_cortical.csv"
+        
+    elif args.target == "trabecular":
+        model_path = "checkpoints/trabecular_unet_bw.pth"
+        images_base = "data/tibia_voi/images_bw"
+        masks_base = "data/tibia_voi/masks_trabecular_bw"
+        csv_path = "logs/metrics_trabecular.csv"
 
-# change above command based on what you need to do today:
+    print(f"--- INITIALIZING PIPELINE ---")
+    print(f"Target: {args.target.upper()}")
+    print(f"Mode: {args.mode.upper()}")
+    
+    # 6. Pass these dynamic variables directly into your training function
+    train_model(
+        run_mode=args.mode, 
+        epochs=50, 
+        model_path=model_path, 
+        images_base=images_base, 
+        masks_base=masks_base, 
+        csv_path=csv_path
+    )
 
+# How to run different training modes:
+# Open terminal (CMD or PowerShell) and navigate to the project directory. 
+# Then execute one of the following commands:
+
+# 1 - Starting a brand-new tibia model:
+# python train_model_bw.py --target tibia --mode new
+
+# 2 - Adding new datasets to your existing tibia model:
+# python train_model_bw.py --target tibia --mode finetune
+
+# Resuming a crashed tibia training run:
+# python train_model_bw.py --target tibia --mode resume
+
+# If you ever forget what commands are available, you can simply type:
+# python train_model_bw.py --help
+
+# What the models do:
 # train_model(run_mode="new", epochs=50): 
 # Generates a completely new random split, starts at Epoch 0, sets LR to 1e-4.
 

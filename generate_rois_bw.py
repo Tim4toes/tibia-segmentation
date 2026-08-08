@@ -5,6 +5,7 @@ import os
 import cv2
 import numpy as np
 import torch
+import argparse
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from pathlib import Path
@@ -12,7 +13,7 @@ from tqdm import tqdm
 from PIL import Image
 from train_model_bw import UNet # Imports your architecture
 
-def generate_rois():
+def generate_rois(model_weights_path, input_dir, output_dir):
     # --- MODEL INITIALISATION ---
     # Detects your RTX 3090, builds the UNet brain, and loads the weights you just 
     # trained. model.eval() locks the network so it doesn't accidentally try to 
@@ -42,8 +43,8 @@ def generate_rois():
     # incoming image to exactly 1024x1024 (matching your training size) and normalises 
     # the pixel brightness so the math behaves predictably.
     # Define base directories using Pathlib for easy path manipulation
-    input_dir = Path("data/inference/input_bw")
-    output_dir = Path("data/inference/output_bw/")
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
     
     # Transform for inference (resizing to match training constraints)
     infer_transform = A.Compose([
@@ -81,7 +82,7 @@ def generate_rois():
         original_height, original_width = original_img.shape
 
         # 3. Apply transforms and move to GPU
-        # Shrinks the image to 1024x1024 and converts it to a PyTorch tensor
+        # Shrinks the image to 960x960 and converts it to a PyTorch tensor
         augmented = infer_transform(image=original_img)
         img_tensor = augmented['image'].unsqueeze(0).to(device)
 
@@ -92,13 +93,13 @@ def generate_rois():
         with torch.no_grad():
             with torch.amp.autocast('cuda'):
                 prediction = model(img_tensor)
-                prob_mask_1024 = torch.sigmoid(prediction).squeeze().cpu().numpy()
+                prob_mask = torch.sigmoid(prediction).squeeze().cpu().numpy()
 
         # 5. Binarize the prediction (strict 0 or 255)
-        binary_mask_1024 = (prob_mask_1024 > 0.5).astype(np.uint8) * 255
+        binary_mask = (prob_mask > 0.5).astype(np.uint8) * 255
 
         # 6. Resize back to original dimensions using NEAREST to prevent grey pixels
-        final_roi_8bit = cv2.resize(binary_mask_1024, (original_width, original_height), interpolation=cv2.INTER_NEAREST)
+        final_roi_8bit = cv2.resize(binary_mask, (original_width, original_height), interpolation=cv2.INTER_NEAREST)
 
         # 7. Save as true 1-Bit Monochrome using Pillow
         # Forces the 8-bit array into strict 1-bit format so CT Analyser can read it
@@ -108,4 +109,50 @@ def generate_rois():
     print(f"Success! All {len(image_paths)} ROIs generated and mirrored seamlessly in {output_dir}")
 
 if __name__ == "__main__":
-    generate_rois()
+# 1. Initialize the parser
+    parser = argparse.ArgumentParser(description="Generate ROIs using trained Attention U-Net")
+    
+    # 2. Add an argument for the anatomical target
+    parser.add_argument(
+        "--target", 
+        type=str, 
+        required=True, 
+        choices=["tibia", "cortical", "trabecular"],
+        help="Select the biological target to segment."
+    )
+    
+    args = parser.parse_args()
+    
+    # 3. Route the paths based on the chosen target
+    if args.target == "tibia":
+        model_weights_path = "checkpoints/tibia_unet_bw.pth"
+        input_dir = "data/inference/input_tibia_bw"
+        output_dir = "data/inference/output_tibia_bw"
+        
+    elif args.target == "cortical":
+        model_weights_path = "checkpoints/cortical_unet_bw.pth"
+        input_dir = "data/inference/input_tibia_voi_bw" # Uses shared cropped images
+        output_dir = "data/inference/output_tibia_cortical_bw" # Outputs to specific cortical folder
+        
+    elif args.target == "trabecular":
+        model_weights_path = "checkpoints/trabecular_unet_bw.pth"
+        input_dir = "data/inference/input_tibia_voi_bw"       # Uses shared cropped images
+        output_dir = "data/inference/output_tibia_trabecular_bw" # Outputs to specific trabecular folder
+
+    print(f"--- INITIALIZING INFERENCE PIPELINE ---")
+    print(f"Target: {args.target.upper()}")
+    print(f"Model: {model_weights_path}")
+    print(f"Input: {input_dir}")
+    print(f"Output: {output_dir}")
+    
+    # 4. Pass the dynamic paths to the function
+    generate_rois(model_weights_path, input_dir, output_dir)
+
+    # To segment your macro whole-bone scans, run:
+    # python generate_rois_bw.py --target tibia
+
+    # To segment your trabecula bone scans, run:
+    # python generate_rois_bw.py --target trabecular
+
+    # To segment your cortical bone scans, run:
+    # python generate_rois_bw.py --target cortical
