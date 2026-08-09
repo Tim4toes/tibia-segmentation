@@ -1,60 +1,107 @@
-# tibia-segmentation
-Segment tibia and tibial cortical and trabecular bone from a microCT scan of a mouse hind leg
+# MicroCT Bone Segmentation Pipeline
 
-For black and white datasets
-Currently load dataset in CTAn and use tasklist to apply threshold and save black and white image dataset.
-Move black and white image dataset to tibia-segmentation/data/macro_tibia/images_bw.
-Move the manually created ROIs/masks (exported as .bmp with CTAn) to 
-tibia-segmentation/data/macro_tibia/masks_tibia.
+This repository contains a deep learning pipeline optimized for segmenting microCT bone scans. It uses a grayscale Attention U-Net architecture to automatically isolate whole-bone macro envelopes (e.g., tibia), as well as intricate micro-architectures (cortical and trabecular bone).
 
-# How to run different training modes:
-Open terminal (CMD or PowerShell) and navigate to the project directory. 
-Then execute one of the following commands:
+The pipeline is split into two primary scripts: `train_model.py` for developing the AI, and `generate_rois.py` for deploying it. It is strictly optimized to run on a 24 GB VRAM GPU and 16 GB of system RAM, utilizing a 960x960 image resolution and restricted CPU worker limits to guarantee system stability.
 
-# 1 - Starting a brand-new tibia model:
-python train_model_bw.py --target tibia --mode new
+---
 
-# 2 - Adding new datasets to your existing tibia model:
-python train_model_bw.py --target tibia --mode finetune
+## 1. Model Training: `train_model.py`
 
-# Resuming a crashed tibia training run:
-python train_model_bw.py --target tibia --mode resume
+### What It Does
 
-# If you ever forget what commands are available, you can simply type:
-python train_model_bw.py --help
+This script trains an Attention U-Net on raw grayscale `.bmp` files. It dynamically groups datasets, applies textural and spatial augmentations, and evaluates performance using a Hybrid BCE + Dice Loss function. It features an automatic learning rate scheduler and calculates HD95 distance metrics only when a new best model is saved.
 
-# What the models do:
-- train_model(run_mode="new", epochs=50): 
-Generates a completely new random split, starts at Epoch 0, sets LR to 1e-4.
+### How to Use It
 
-- train_model(run_mode="resume", epochs=50): 
-Reads your last checkpoint, locks in the exact same validation datasets, 
-loads your optimizer momentum, and picks up exactly on the epoch where you cancelled it.
+The script is controlled entirely via the terminal using command-line arguments. You do not need to manually edit file paths inside the Python code.
 
-- train_model(run_mode="finetune", epochs=100): 
-Reads your last checkpoint, locks in the validation datasets, 
-drops the LR to 1e-5, resets the epoch counter to 0, 
-and begins delicate training (perfect for when you drop new datasets into your folders).
+**Command Structure:**
 
-# To generate ROIs for new images, repeat same thresholding and datset saving tasklist in CTAn as for tibia.
-Move the new black and white datasets to the input folderd within the inference folder (see description at end of generate_rois_bw.py).
+```bash
+python train_model.py --target [TARGET] --mode [MODE]
 
-Open terminal (CMD or Powershell)
-# 1 - To segment your macro whole-bone scans, run:
-python generate_rois_bw.py --target tibia
+```
 
-# 2 - To segment your trabecula bone scans, run:
-python generate_rois_bw.py --target trabecular
+### Argument 1: `--target` (Required)
 
-# 3 - To segment your cortical bone scans, run:
-python generate_rois_bw.py --target cortical
+This argument routes the script to the correct data directories and dictates which weights file to update.
 
-New ROIs (.bmp files) for the new black and white datasets will be stored in the output folders within the inference folder.
-Copy these ROIs to the original tibia, trabecular, cortical etc. dataset folder.
-Load ROI as .bmp on the original dataset in CTAn and inspect for errors.
-Correct errors and save ROI as .roi file.
-Run analysis in CTAn.
+* `--target tibia`: Use this when training the macro whole-bone envelope. It looks for full-frame raw scans in the `data/macro_tibia/images` directory.
+* `--target cortical`: Use this when training the dense cortical shell model. It targets cropped Volumes of Interest (VOIs) in the `data/tibia_voi/images` directory.
+* `--target trabecular`: Use this when training the delicate trabecular network model. It targets the same shared cropped VOIs in the `data/tibia_voi/images` directory but uses trabecular-specific masks.
 
-In future:
-For grey scale images
-Same as black and white, but run calculate_global_mean.py to calculate the mean and std values for the image augmentation section in train_model.py.
+### Argument 2: `--mode` (Optional, defaults to 'new')
+
+This argument dictates the training behavior and optimizer state.
+
+* `--mode new`: Starts a completely brand-new training run.
+* **Use Case:** When building a model from scratch. It generates a completely unseeded, random validation split, initializes a high learning rate (1e-4), and starts at Epoch 0.
+
+
+* `--mode resume`: Picks up exactly where a previous run left off.
+* **Use Case:** If your computer crashes or you accidentally cancel the terminal. It loads the exact same validation split, retains the optimizer's aggressive momentum, and resumes from the exact epoch it stopped on.
+
+
+* `--mode finetune`: Delicately updates an established model.
+* **Use Case:** When you have curated new datasets and added them to your folders. It locks in the established validation split, resets the epoch counter to 0, drops the learning rate to 1e-5, and resets momentum to zero. This integrates the new scans without erasing the model's baseline anatomical knowledge.
+
+
+
+---
+
+## 2. ROI Generation: `generate_rois.py`
+
+### What It Does
+
+This script deploys your trained models to generate Regions of Interest (ROIs) on unseen scans. It processes raw grayscale images through the network, applies a 3x3 median blur to smooth out jagged artifacts, and strictly forces the output into a 1-bit monochrome format (0 or 255) so the masks can be directly imported into software like CT Analyser for morphometry.
+
+### How to Use It
+
+Inference is routed dynamically via the terminal. You can use the default project folders, or seamlessly point the script to external hard drives to save time and storage space.
+
+**Command Structure:**
+
+```bash
+python generate_rois.py --target [TARGET] [--input PATH] [--output PATH]
+
+```
+
+### Argument 1: `--target` (Required)
+
+This argument determines which anatomical weights to load and establishes the default folder paths.
+
+* `--target tibia`: Run on uncropped, full-frame microCT scans.
+* `--target cortical`: Run on specific sub-regions (VOIs) pre-cropped in your analysis software.
+* `--target trabecular`: Run on the exact same cropped VOIs to extract the internal strut network.
+
+### Arguments 2 & 3: `--input` and `--output` (Optional Overrides)
+
+By default, the script routes to the internal `data/inference/` folders. You can override these defaults to read from or write to external drives.
+
+* **Standard Operation (Default Paths):**
+Reads from and writes to the internal project folders.
+```bash
+python generate_rois.py --target tibia
+
+```
+
+
+* **External Input (Read from another drive):**
+Reads datasets from an external folder, but saves the generated ROIs to your standard internal output folder.
+```bash
+python generate_rois.py --target trabecular --input "F:\External_Data\Scans\Batch_1"
+
+```
+
+
+* **External Input AND Output (Full Bypass):**
+Reads from an external folder and saves the finished ROIs right back to an external drive, entirely bypassing your main project directory.
+```bash
+python generate_rois.py --target cortical --input "F:\External_Data\Scans\Batch_1" --output "F:\External_Data\ROIs\Batch_1_Cortical"
+
+```
+
+
+
+**Note on File Structure:** `generate_rois.py` will perfectly mirror whatever nested subfolder structure you place in the input directory. Ensure your incoming scans are grouped in folders (e.g., `dataset_1`, `dataset_2`) before running the script.
