@@ -23,7 +23,6 @@ def generate_rois(model_weights_path, input_dir, output_dir):
     model = UNet().to(device)
     
     # Check if the trained model exists before trying to load it
-    model_weights_path = "tibia_unet_bw.pth"
     if not os.path.exists(model_weights_path):
         print(f"Error: Could not find {model_weights_path}. Run train_model_bw.py first.")
         return
