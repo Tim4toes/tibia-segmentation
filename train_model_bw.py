@@ -242,6 +242,27 @@ class UNet(nn.Module):
 
         return self.final_conv(x)
 
+class BCEDiceLoss(nn.Module):
+    def __init__(self):
+        super(BCEDiceLoss, self).__init__()
+        self.bce = nn.BCEWithLogitsLoss()
+
+    def forward(self, logits, targets):
+        # 1. Pixel-wise BCE loss
+        bce_loss = self.bce(logits, targets)
+        
+        # 2. Global Dice loss
+        probs = torch.sigmoid(logits)
+        probs_flat = probs.view(-1)
+        targets_flat = targets.view(-1)
+        
+        intersection = (probs_flat * targets_flat).sum()
+        dice = (2. * intersection + 1e-6) / (probs_flat.sum() + targets_flat.sum() + 1e-6)
+        dice_loss = 1 - dice
+        
+        # Combine both losses
+        return bce_loss + dice_loss
+
 # --- 4.5 EVALUATION METRICS ---
 def calculate_metrics(pred_logits, true_masks,compute_hd95=False):
     # Only calculate the fast GPU overlap metrics here
@@ -345,9 +366,16 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
     val_loader = DataLoader(val_dataset, batch_size=5, shuffle=False, num_workers=3, pin_memory=True, persistent_workers=True)
     
     # Set up math optimizers
+# Set up math optimizers and the new Hybrid Loss
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = BCEDiceLoss() # NEW: Upgraded loss function
     scaler = torch.amp.GradScaler('cuda') 
+    
+    # NEW: Automatic Learning Rate Scheduler
+    # Cuts the LR in half if validation loss plateaus for 3 epochs
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+    )
     
     best_loss = float('inf') 
     
@@ -412,6 +440,10 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
             
             current_eval_loss = avg_val_loss
             loss_type = "Val Loss"
+
+            # NEW: Tell the scheduler how the AI performed this epoch
+            scheduler.step(current_eval_loss)
+
         else:
             print(f"Avg Train Loss: {avg_train_loss:.4f} | (No validation data available)")
             current_eval_loss = avg_train_loss
