@@ -98,7 +98,9 @@ class BoneDataset(Dataset):
              raise FileNotFoundError(f"Missing mask for {img_path}")
                 
         # Binarize mask for Tissue Volume envelope (0 = background, 1 = bone ROI)
-        mask = (mask > 127).astype(np.float32)
+        # --- RAM OPTIMIZATION FIX ---
+        # Keep mask as an 8-bit integer (uint8) in system RAM to reduce worker queue size by 75%.
+        mask = (mask > 127).astype(np.uint8)
 
         if self.transform:
             augmentations = self.transform(image=image, mask=mask)
@@ -125,7 +127,7 @@ train_transform = A.Compose([
     A.GridDistortion(p=0.5, interpolation=cv2.INTER_NEAREST),
     
     A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-    A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+    A.GaussNoise(std_range=(0.01, 0.03), p=0.5),
     
     # Dataset Z-Score Normalization
     A.Normalize(mean=[0.0330], std=[0.0726], max_pixel_value=255.0), 
@@ -350,21 +352,25 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
     val_dataset = BoneDataset(val_folders, masks_base, transform=val_transform)
 
     # CRITICAL OPTIMIZATION: num_workers reduced to 2 for train, 1 for val to prevent 16GB RAM crash
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=1, pin_memory=True, persistent_workers=True)
+    # --- RAM OPTIMIZATION FIX ---
+    # Kept num_workers low for system stability, but explicitly restricted prefetch_factor to 2.
+    # This prevents the CPU from aggressively caching too many batches ahead of time, saving RAM.
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True, prefetch_factor=2)
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=1, pin_memory=True, persistent_workers=True, prefetch_factor=2)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = BCEDiceLoss() 
     scaler = torch.amp.GradScaler('cuda') 
     
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+        optimizer, mode='min', factor=0.5, patience=5 
     )
     
     best_loss = float('inf')
     
     for epoch in range(epochs):
-        print(f"\n--- Epoch {epoch+1}/{epochs} ---")
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"\n--- Epoch {epoch+1}/{epochs} | Current LR: {current_lr:.2e} ---")
         
         # --- TRAINING PHASE ---
         model.train()
