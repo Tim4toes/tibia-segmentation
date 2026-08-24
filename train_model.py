@@ -28,9 +28,11 @@ from medpy.metric.binary import hd95
 # the specific bone rather than learning general anatomy. This ensures the model 
 # is always tested against entirely unseen morphology.
 # =============================================================================
-def get_stratified_split(images_base_dir, val_samples_per_group=1, forced_val_folders=None):
+def get_stratified_split(images_base_dir, val_ratio=0.16, forced_val_folders=None): 
     image_dir = Path(images_base_dir)
     dataset_folders = [f for f in image_dir.iterdir() if f.is_dir()]
+
+    # use val_samples_per_group=1 or more instead of val_ratio=0.2 to manually select number of validation datasets
     
     train_folders = []
     val_folders = []
@@ -53,14 +55,18 @@ def get_stratified_split(images_base_dir, val_samples_per_group=1, forced_val_fo
         
     for group, folders in groups.items():
         random.shuffle(folders) 
-        if len(folders) <= val_samples_per_group:
+
+        # Calculate 20% of the folders in this specific group
+        num_val_samples = round(len(folders) * val_ratio)
+
+        if len(folders) <= num_val_samples == 0:
             print(f"Warning: Group '{group}' only has {len(folders)} dataset(s). Assigning to training.")
             train_folders.extend(folders)
         else:
-            val_folders.extend(folders[:val_samples_per_group])
-            train_folders.extend(folders[val_samples_per_group:])
+            val_folders.extend(folders[:num_val_samples])
+            train_folders.extend(folders[num_val_samples:])
             
-    print(f"New validation sets randomly selected: {[f.name for f in val_folders]}")
+    print(f"Total Validation Sets: {len(val_folders)} | Folders: {[f.name for f in val_folders]}")
     return train_folders, val_folders
 
 # =============================================================================
