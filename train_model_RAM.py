@@ -1,5 +1,5 @@
 # This script trains an Attention U-Net model for grayscale bone segmentation.
-# OPTIMIZED FOR 240GB SYSTEM RAM & 24GB VRAM.
+# OPTIMIZED FOR: 384GB System RAM, Dual Xeon CPUs (40 threads), and 12GB VRAM (RTX A2000).
 
 import os
 import cv2
@@ -18,22 +18,22 @@ from medpy.metric.binary import hd95
 
 # =============================================================================
 # --- 1. STRATIFIED SPLITTER ---
+# WHAT IT DOES: Scans the master image directory, identifies individual datasets 
+# based on their folder names (e.g., separating wildtype from knockout models), 
+# and randomly divides them into training and validation groups.
+# WHY IT IS NEEDED: Prevents "data leakage." If slices from the same physical bone 
+# end up in both the training and validation sets, the AI will cheat by memorizing 
+# the specific bone rather than learning general anatomy. This ensures the model 
+# is always tested against entirely unseen morphology.
 # =============================================================================
-def get_stratified_split(images_base_dir, val_samples_per_group=1, forced_val_folders=None):
+def get_stratified_split(images_base_dir, val_ratio=0.16, forced_val_folders=None): 
     image_dir = Path(images_base_dir)
     dataset_folders = [f for f in image_dir.iterdir() if f.is_dir()]
+
+    # use val_samples_per_group=1 or more instead of val_ratio=0.2 to manually select number of validation datasets
     
     train_folders = []
     val_folders = []
-
-    if forced_val_folders is not None:
-        print(f"Locking validation to previously saved folders: {forced_val_folders}")
-        for folder in dataset_folders:
-            if folder.name in forced_val_folders:
-                val_folders.append(folder)
-            else:
-                train_folders.append(folder)
-        return train_folders, val_folders
 
     groups = {}
     for folder in dataset_folders:
@@ -42,22 +42,54 @@ def get_stratified_split(images_base_dir, val_samples_per_group=1, forced_val_fo
             groups[group_name] = []
         groups[group_name].append(folder)
         
+    print(f"Detected {len(groups)} distinct genotype groups.")
+    
     for group, folders in groups.items():
         random.shuffle(folders) 
-        if len(folders) <= val_samples_per_group:
-            print(f"Warning: Group '{group}' only has {len(folders)} dataset(s). Assigning to training.")
-            train_folders.extend(folders)
-        else:
-            val_folders.extend(folders[:val_samples_per_group])
-            train_folders.extend(folders[val_samples_per_group:])
+        
+        # Calculate dynamic 16% split for the current group
+        num_val_samples = round(len(folders) * val_ratio)
+        
+        # --- FINETUNE / RESUME MODE ---
+        if forced_val_folders is not None:
+            group_forced_vals = [f for f in folders if f.name in forced_val_folders]
             
-    print(f"New validation sets randomly selected: {[f.name for f in val_folders]}")
+            if len(group_forced_vals) > 0:
+                val_folders.extend(group_forced_vals)
+                train_folders.extend([f for f in folders if f.name not in forced_val_folders])
+                print(f"  - Group '{group}': Retained {len(group_forced_vals)} historical validation sets.")
+            else:
+                # HYBRID LOGIC: A completely new genotype was detected during finetuning
+                if len(folders) <= num_val_samples or num_val_samples == 0:
+                    print(f"  - Warning: New Group '{group}' only has {len(folders)} dataset(s). Assigning all to training.")
+                    train_folders.extend(folders)
+                else:
+                    new_vals = folders[:num_val_samples]
+                    val_folders.extend(new_vals)
+                    train_folders.extend(folders[num_val_samples:])
+                    print(f"  - Group '{group}': New genotype detected! Selected {len(new_vals)} new validation sets (16% ratio).")
+        
+        # --- NEW MODE (Blank Slate) ---
+        else:
+            if len(folders) <= num_val_samples or num_val_samples == 0:
+                print(f"  - Warning: Group '{group}' only has {len(folders)} dataset(s). Assigning all to training.")
+                train_folders.extend(folders)
+            else:
+                val_folders.extend(folders[:num_val_samples])
+                train_folders.extend(folders[num_val_samples:])
+                print(f"  - Group '{group}': Selected {num_val_samples} validation sets (16% ratio).")
+            
+    print(f"Final Validation Split: {[f.name for f in val_folders]}")
+    print(f"Total Validation Sets: {len(val_folders)} | Folders: {[f.name for f in val_folders]}")
     return train_folders, val_folders
 
 # =============================================================================
-# --- 2. DATA LOADER (RAM OPTIMIZED) ---
-# WHAT IT DOES: Pre-loads the entire dataset directly into system RAM to completely 
-# eliminate hard drive I/O latency, feeding the GPU as fast as it can process.
+# --- 2. DATA LOADER ---
+# WHAT IT DOES: Pre-loads the entire 210GB dataset into system RAM to completely 
+# eliminate hard drive I/O latency. 
+# WHY IT IS NEEDED: Prevents the CPU from waiting on disk read speeds. By enforcing 
+# np.uint8 (8-bit) storage, the 7 datasets comfortably fit within your 384GB limit 
+# without causing an OS crash.
 # =============================================================================
 class BoneDataset(Dataset):
     def __init__(self, folder_list, mask_base_dir, transform=None):
@@ -68,10 +100,8 @@ class BoneDataset(Dataset):
         for folder in folder_list:
             self.image_paths.extend(list(folder.rglob("*.bmp")))
 
-        # --- RAM OPTIMIZATION: PRE-LOAD DATASET ---
-        # With 240GB available, a ~30GB dataset easily fits into active memory.
         self.ram_cache = []
-        print(f"Caching {len(self.image_paths)} images into System RAM to bypass disk latency...")
+        print(f"Caching {len(self.image_paths)} images into System RAM...")
         
         for img_path in tqdm(self.image_paths, desc="Loading Dataset to RAM"):
             folder_name = img_path.parent.name
@@ -84,14 +114,16 @@ class BoneDataset(Dataset):
             if mask is None:
                  raise FileNotFoundError(f"Missing mask for {img_path}")
                     
-            mask = (mask > 127).astype(np.float32)
-            self.ram_cache.append((image, mask))
+            # CRITICAL: Keep as 8-bit integer in RAM. A 32-bit float would quadruple 
+            # the size of your 210GB dataset and instantly crash your 384GB system.
+            mask = (mask > 127).astype(np.uint8)
+            self.ram_cache.append((image, mask))    
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        # Fetch instantaneously from the pre-loaded RAM list
+        # Instant RAM fetch
         image, mask = self.ram_cache[idx]
 
         if self.transform:
@@ -103,6 +135,13 @@ class BoneDataset(Dataset):
 
 # =============================================================================
 # --- 3. IMAGE AUGMENTATIONS ---
+# WHAT IT DOES: Alters the images in real-time before they hit the network. It 
+# dynamically warps shapes, flips orientations, injects static noise, shifts contrast, 
+# and normalizes the pixel distribution.
+# WHY IT IS NEEDED: Prevents overfitting. By constantly changing the visual presentation 
+# of the bone, the AI cannot memorize specific pixels. The textural augmentations 
+# specifically force the model to rely on actual tissue density differences (Hounsfield units) 
+# rather than scanning artifacts.
 # =============================================================================
 train_transform = A.Compose([
     A.Resize(960, 960, interpolation=cv2.INTER_NEAREST),
@@ -112,20 +151,27 @@ train_transform = A.Compose([
     A.GridDistortion(p=0.5, interpolation=cv2.INTER_NEAREST),
     
     A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-    A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+    A.GaussNoise(std_range=(0.01, 0.03), p=0.5),
     
-    A.Normalize(mean=[0.0330], std=[0.0726], max_pixel_value=255.0), 
+    # Dataset Z-Score Normalization
+    A.Normalize(mean=[0.0343], std=[0.0732], max_pixel_value=255.0), 
     ToTensorV2(),
 ])
 
 val_transform = A.Compose([
     A.Resize(960,960, interpolation=cv2.INTER_NEAREST),
-    A.Normalize(mean=[0.0330], std=[0.0726], max_pixel_value=255.0), 
+    A.Normalize(mean=[0.0343], std=[0.0732], max_pixel_value=255.0), 
     ToTensorV2(),
 ])
 
 # =============================================================================
 # --- 4. ATTENTION U-NET ARCHITECTURE ---
+# WHAT IT DOES: Builds the neural network blueprint. The encoder extracts features 
+# as the image shrinks, the decoder reconstructs the image using those features, and 
+# the Attention Gates filter the skip connections.
+# WHY IT IS NEEDED: Standard U-Nets pass all visual data equally. Attention Gates 
+# learn to highlight salient features (like dense cortical bone edges) while muting 
+# irrelevant background noise (like air or soft tissue), resulting in much sharper boundaries.
 # =============================================================================
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -208,6 +254,11 @@ class UNet(nn.Module):
 
 # =============================================================================
 # --- 5. HYBRID LOSS FUNCTION ---
+# WHAT IT DOES: Combines Pixel-wise Binary Cross Entropy (BCE) with Global Dice Loss.
+# WHY IT IS NEEDED: BCE evaluates each pixel independently, which can cause the AI 
+# to become lazy if 90% of the scan is empty background space. Dice Loss calculates 
+# the overall geometrical overlap of the bone prediction. Fusing them forces the model 
+# to be highly accurate on complex boundaries (like trabecular struts).
 # =============================================================================
 class BCEDiceLoss(nn.Module):
     def __init__(self):
@@ -228,6 +279,11 @@ class BCEDiceLoss(nn.Module):
 
 # =============================================================================
 # --- 6. EVALUATION METRICS ---
+# WHAT IT DOES: Compares the AI's output to your manual masks, generating scores 
+# like DSC (overlap), Sensitivity (true positive rate), and HD95 (distance error).
+# WHY IT IS NEEDED: These metrics tell you objectively if the model is getting better 
+# or worse. HD95 is strictly sequestered behind a conditional toggle because it is 
+# notoriously CPU-heavy and would stall training if calculated on every batch.
 # =============================================================================
 def calculate_metrics(pred_logits, true_masks,compute_hd95=False):
     preds = (torch.sigmoid(pred_logits) > 0.5).float()
@@ -261,6 +317,11 @@ def calculate_metrics(pred_logits, true_masks,compute_hd95=False):
 
 # =============================================================================
 # --- 7. MAIN TRAINING LOOP ---
+# WHAT IT DOES: The central command hub. It manages the 3-mode loading logic, 
+# orchestrates the forward and backward passes (learning), triggers the validation 
+# testing phase, manages the learning rate scheduler, and commits the best models to disk.
+# WHY IT IS NEEDED: Automates the entire complex deep learning pipeline so you only 
+# need to execute a single terminal command to handle training, testing, and logging.
 # =============================================================================
 def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -272,7 +333,7 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
     
     if run_mode in ["resume", "finetune"] and os.path.exists(model_path):
         print(f"\nLoading checkpoint for {run_mode.upper()} mode...")
-        checkpoint = torch.load(model_path)
+        checkpoint = torch.load(model_path, weights_only=False)
         
         if 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'])
@@ -314,24 +375,28 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
     train_dataset = BoneDataset(train_folders, masks_base, transform=train_transform)
     val_dataset = BoneDataset(val_folders, masks_base, transform=val_transform)
 
-    # --- RAM OPTIMIZATION: MULTIPROCESSING UNLOCKED ---
-    # With 240GB of memory, we can crank num_workers to 8 and increase prefetch 
-    # to drastically speed up CPU augmentations without crashing the system.
-    train_loader = DataLoader(train_dataset, batch_size=5, shuffle=True, num_workers=8, pin_memory=True, persistent_workers=True, prefetch_factor=4)
-    val_loader = DataLoader(val_dataset, batch_size=5, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True, prefetch_factor=4)
-    
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    # =============================================================================
+    # --- RAM/CPU OPTIMIZATION FIX ---
+    # With 40 threads available via Dual Xeons, workers are cranked up to 16/8 to handle 
+    # the heavy Albumentations math. `batch_size=4` is enforced to prevent the A2000's 
+    # 12GB VRAM limit from causing a CUDA Out Of Memory crash on 960x960 tensors. 
+    # =============================================================================
+    train_loader = DataLoader(
+        train_dataset, batch_size=4, shuffle=True, 
+        num_workers=16, pin_memory=True, persistent_workers=True, prefetch_factor=4
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=4, shuffle=False, 
+        num_workers=8, pin_memory=True, persistent_workers=True, prefetch_factor=4
+    )
     criterion = BCEDiceLoss() 
-    scaler = torch.amp.GradScaler('cuda') 
-    
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+        optimizer, mode='min', factor=0.5, patience=5 
     )
     
-    best_loss = float('inf')
-    
-    for epoch in range(epochs):
-        print(f"\n--- Epoch {epoch+1}/{epochs} ---")
+    for epoch in range(start_epoch, epochs):
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"\n--- Epoch {epoch+1}/{epochs} | Current LR: {current_lr:.2e} ---")
         
         # --- TRAINING PHASE ---
         model.train()
@@ -339,8 +404,9 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
         loop = tqdm(train_loader, desc="Training")
         
         for data, targets in loop:
-            data = data.to(device)
-            targets = targets.float().unsqueeze(1).to(device)
+            # non_blocking=True utilizes the pin_memory flag for faster CPU->GPU PCIe transfer
+            data = data.to(device, non_blocking=True)
+            targets = targets.float().unsqueeze(1).to(device, non_blocking=True)
             
             with torch.amp.autocast('cuda'):
                 predictions = model(data)
@@ -360,11 +426,14 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
         model.eval()
         val_loss = 0
         val_metrics = {"dsc": 0, "iou": 0, "sens": 0, "prec": 0}
+
+        stored_preds = []
+        stored_targets = []
         
         with torch.no_grad():
             for data, targets in val_loader:
-                data = data.to(device)
-                targets = targets.float().unsqueeze(1).to(device)
+                data = data.to(device, non_blocking=True)
+                targets = targets.float().unsqueeze(1).to(device, non_blocking=True)
                 
                 with torch.amp.autocast('cuda'):
                     predictions = model(data)
@@ -372,11 +441,14 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
                     
                 val_loss += loss.item()
                 
-                dsc, iou, sens, prec, _ = calculate_metrics(predictions, targets, compute_hd95=False)
+                dsc, iou, sens, prec, _ = calculate_metrics(predictions, targets)
                 val_metrics["dsc"] += dsc
                 val_metrics["iou"] += iou
                 val_metrics["sens"] += sens
                 val_metrics["prec"] += prec
+
+                stored_preds.append((torch.sigmoid(predictions) > 0.5).cpu().numpy())
+                stored_targets.append(targets.cpu().numpy())
                 
         if len(val_loader) > 0:
             avg_val_loss = val_loss / len(val_loader)
@@ -411,23 +483,16 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
 
             torch.save(checkpoint_dict, model_path)
 
-            print(f"*** New best model found! Calculating HD95 across validation set... ***")
+            # HD95 CACHE FIX: Calculates directly from stored CPU arrays.
+            print(f"*** New best model found! Calculating HD95 from cached arrays... ***")
             hd95_scores = []
-
-            with torch.no_grad():
-                hd95_loop = tqdm(val_loader, desc="Calculating HD95", leave=False)
-                
-                for data, targets in hd95_loop:
-                    data = data.to(device)
-                    targets = targets.float().unsqueeze(1).to(device)
-                    
-                    with torch.amp.autocast('cuda'):
-                        predictions = model(data)
-                        
-                    _, _, _, _, batch_hd95 = calculate_metrics(predictions, targets, compute_hd95=True)
-                    if not np.isnan(batch_hd95):
-                        hd95_scores.append(batch_hd95)
-                        hd95_loop.set_postfix(batch_hd95=f"{batch_hd95:.2f} px")
+            
+            for batch_preds, batch_targets in zip(stored_preds, stored_targets):
+                for i in range(batch_preds.shape[0]):
+                    p = batch_preds[i].squeeze()
+                    t = batch_targets[i].squeeze()
+                    if p.max() > 0 and t.max() > 0:
+                        hd95_scores.append(hd95(p, t))
                         
             avg_hd95 = np.mean(hd95_scores) if len(hd95_scores) > 0 else float('nan')
             print(f"*** Best Model Saved ({loss_type}: {best_loss:.4f}) | HD95: {avg_hd95:.2f} px ***")
@@ -455,6 +520,10 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
 
 # =============================================================================
 # --- 8. TERMINAL PARSER ---
+# WHAT IT DOES: intercepts the commands you type in your command prompt and 
+# dynamically assigns the correct variables before running the train_model() function.
+# WHY IT IS NEEDED: Prevents you from having to manually hardcode file paths every 
+# time you want to switch between training a macro tibia model and a trabecular model.
 # =============================================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Attention U-Net for Grayscale Bone Segmentation")
@@ -480,7 +549,7 @@ if __name__ == "__main__":
     if args.target == "tibia":
         model_path = "checkpoints/tibia_unet.pth"
         images_base = "data/macro_tibia/images"
-        masks_base = "data/macro_tibia/masks_tibia"
+        masks_base = "data/macro_tibia/masks"
         csv_path = "logs/metrics_tibia.csv"
         
     elif args.target == "cortical":
@@ -507,3 +576,29 @@ if __name__ == "__main__":
         masks_base=masks_base, 
         csv_path=csv_path
     )
+
+# How to run different training modes:
+# Open terminal (CMD or PowerShell) and navigate to the project directory. 
+# Then execute one of the following commands:
+
+# 1 - Starting a brand-new tibia model:
+# python train_model.py --target tibia --mode new
+
+# 2 - Adding new datasets to your existing tibia model:
+# python train_model.py --target tibia --mode finetune
+
+# 3 - Resuming a crashed tibia training run:
+# python train_model.py --target tibia --mode resume
+
+# What the models do:
+# train_model(run_mode="new", epochs=50): 
+# Generates a completely new random split, starts at Epoch 0, sets LR to 1e-4.
+
+# train_model(run_mode="resume", epochs=50): 
+# Reads your last checkpoint, locks in the exact same validation datasets, 
+# loads your optimizer momentum, and picks up exactly on the epoch where you cancelled it.
+
+# train_model(run_mode="finetune", epochs=100): 
+# Reads your last checkpoint, locks in the validation datasets, 
+# drops the LR to 1e-5, resets the epoch counter to 0, 
+# and begins delicate training (perfect for when you drop new datasets into your folders).
