@@ -135,3 +135,13 @@ Then, visit the PyTorch Get Started page to generate the specific installation c
 A typical command for Windows with CUDA 11.8 or 12.1 looks like this:
 
 pip install torch torchvision torchaudio --index-url [https://download.pytorch.org/whl/cu121](https://download.pytorch.org/whl/cu121)
+
+## Portable Git
+Download and install portable Git
+https://git-scm.com/install/windows
+
+Add the path to the Git executable in Visual Studio Code settings (menu File → Preferences → Settings - search for git.path):
+```bash
+"git.path": "C:\\Users\\XXX\\Git\\cmd\\git"
+```
+
