@@ -37,15 +37,6 @@ def get_stratified_split(images_base_dir, val_ratio=0.16, forced_val_folders=Non
     train_folders = []
     val_folders = []
 
-    if forced_val_folders is not None:
-        print(f"Locking validation to previously saved folders: {forced_val_folders}")
-        for folder in dataset_folders:
-            if folder.name in forced_val_folders:
-                val_folders.append(folder)
-            else:
-                train_folders.append(folder)
-        return train_folders, val_folders
-
     groups = {}
     for folder in dataset_folders:
         group_name = folder.name.split('_')[-1].lower()
@@ -53,19 +44,44 @@ def get_stratified_split(images_base_dir, val_ratio=0.16, forced_val_folders=Non
             groups[group_name] = []
         groups[group_name].append(folder)
         
+    print(f"Detected {len(groups)} distinct genotype groups.")
+    
     for group, folders in groups.items():
         random.shuffle(folders) 
-
-        # Calculate 20% of the folders in this specific group
+        
+        # Calculate dynamic 16% training/validationsplit for the current group
         num_val_samples = round(len(folders) * val_ratio)
-
-        if len(folders) <= num_val_samples == 0:
-            print(f"Warning: Group '{group}' only has {len(folders)} dataset(s). Assigning to training.")
-            train_folders.extend(folders)
-        else:
-            val_folders.extend(folders[:num_val_samples])
-            train_folders.extend(folders[num_val_samples:])
+        
+        # --- FINETUNE / RESUME MODE ---
+        if forced_val_folders is not None:
+            group_forced_vals = [f for f in folders if f.name in forced_val_folders]
             
+            if len(group_forced_vals) > 0:
+                val_folders.extend(group_forced_vals)
+                train_folders.extend([f for f in folders if f.name not in forced_val_folders])
+                print(f"  - Group '{group}': Retained {len(group_forced_vals)} historical validation sets.")
+            else:
+                # HYBRID LOGIC: A completely new genotype was detected during finetuning
+                if len(folders) <= num_val_samples or num_val_samples == 0:
+                    print(f"  - Warning: New Group '{group}' only has {len(folders)} dataset(s). Assigning all to training.")
+                    train_folders.extend(folders)
+                else:
+                    new_vals = folders[:num_val_samples]
+                    val_folders.extend(new_vals)
+                    train_folders.extend(folders[num_val_samples:])
+                    print(f"  - Group '{group}': New genotype detected! Selected {len(new_vals)} new validation sets (16% ratio).")
+        
+        # --- NEW MODE (Blank Slate) ---
+        else:
+            if len(folders) <= num_val_samples or num_val_samples == 0:
+                print(f"  - Warning: Group '{group}' only has {len(folders)} dataset(s). Assigning all to training.")
+                train_folders.extend(folders)
+            else:
+                val_folders.extend(folders[:num_val_samples])
+                train_folders.extend(folders[num_val_samples:])
+                print(f"  - Group '{group}': Selected {num_val_samples} validation sets (16% ratio).")
+            
+    print(f"Final Validation Split: {[f.name for f in val_folders]}")
     print(f"Total Validation Sets: {len(val_folders)} | Folders: {[f.name for f in val_folders]}")
     return train_folders, val_folders
 
@@ -129,13 +145,16 @@ train_transform = A.Compose([
     A.Resize(960, 960, interpolation=cv2.INTER_NEAREST),
     A.Rotate(limit=35, p=0.8, interpolation=cv2.INTER_NEAREST),
     A.HorizontalFlip(p=0.5),
+
+    # Shape-warping to prevent rigid morphology overfitting
     A.ElasticTransform(alpha=1, sigma=50, p=0.5, interpolation=cv2.INTER_NEAREST),
     A.GridDistortion(p=0.5, interpolation=cv2.INTER_NEAREST),
-    
+
+    # 2D textural augmentations 
     A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
     A.GaussNoise(std_range=(0.01, 0.03), p=0.5),
     
-    # Dataset Z-Score Normalization
+    # Dataset Z-Score normalisation
     A.Normalize(mean=[0.0330], std=[0.0726], max_pixel_value=255.0), 
     ToTensorV2(),
 ])
@@ -267,7 +286,7 @@ class BCEDiceLoss(nn.Module):
 # or worse. HD95 is strictly sequestered behind a conditional toggle because it is 
 # notoriously CPU-heavy and would stall training if calculated on every batch.
 # =============================================================================
-def calculate_metrics(pred_logits, true_masks,compute_hd95=False):
+def calculate_metrics(pred_logits, true_masks):
     preds = (torch.sigmoid(pred_logits) > 0.5).float()
     
     TP = (preds * true_masks).sum()
@@ -278,22 +297,6 @@ def calculate_metrics(pred_logits, true_masks,compute_hd95=False):
     iou = TP / (TP + FP + FN + 1e-6)
     sensitivity = TP / (TP + FN + 1e-6)
     precision = TP / (TP + FP + 1e-6)
-            
-    batch_hd95 = np.nan
-    
-    if compute_hd95:
-        hd95_list = []
-        preds_np = preds.cpu().numpy()
-        trues_np = true_masks.cpu().numpy()
-        
-        for i in range(preds_np.shape[0]):
-            p = preds_np[i].squeeze()
-            t = trues_np[i].squeeze()
-            if p.max() > 0 and t.max() > 0:
-                hd95_list.append(hd95(p, t))
-                
-        if len(hd95_list) > 0:
-            batch_hd95 = np.mean(hd95_list)
             
     return dsc.item(), iou.item(), sensitivity.item(), precision.item(), batch_hd95
 
@@ -406,10 +409,13 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
         val_loss = 0
         val_metrics = {"dsc": 0, "iou": 0, "sens": 0, "prec": 0}
         
+        stored_preds = []
+        stored_targets = []
+        
         with torch.no_grad():
             for data, targets in val_loader:
-                data = data.to(device)
-                targets = targets.float().unsqueeze(1).to(device)
+                data = data.to(device, non_blocking=True)
+                targets = targets.float().unsqueeze(1).to(device, non_blocking=True)
                 
                 with torch.amp.autocast('cuda'):
                     predictions = model(data)
@@ -417,11 +423,15 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
                     
                 val_loss += loss.item()
                 
-                dsc, iou, sens, prec, _ = calculate_metrics(predictions, targets, compute_hd95=False)
+                dsc, iou, sens, prec = calculate_metrics(predictions, targets)
                 val_metrics["dsc"] += dsc
                 val_metrics["iou"] += iou
                 val_metrics["sens"] += sens
                 val_metrics["prec"] += prec
+                
+                # Cache arrays for HD95 to eliminate double GPU pass; store lightweight binary arrays in CPU RAM
+                stored_preds.append((torch.sigmoid(predictions) > 0.5).cpu().numpy())
+                stored_targets.append(targets.cpu().numpy())
                 
         if len(val_loader) > 0:
             avg_val_loss = val_loss / len(val_loader)
@@ -459,20 +469,19 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
             print(f"*** New best model found! Calculating HD95 across validation set... ***")
             hd95_scores = []
 
-            with torch.no_grad():
-                hd95_loop = tqdm(val_loader, desc="Calculating HD95", leave=False)
-                
-                for data, targets in hd95_loop:
-                    data = data.to(device)
-                    targets = targets.float().unsqueeze(1).to(device)
-                    
-                    with torch.amp.autocast('cuda'):
-                        predictions = model(data)
-                        
-                    _, _, _, _, batch_hd95 = calculate_metrics(predictions, targets, compute_hd95=True)
-                    if not np.isnan(batch_hd95):
-                        hd95_scores.append(batch_hd95)
-                        hd95_loop.set_postfix(batch_hd95=f"{batch_hd95:.2f} px")
+            # Wrap the zipped arrays in tqdm to create a live progress bar
+            hd95_loop = tqdm(zip(stored_preds, stored_targets), total=len(stored_preds), desc="Calculating HD95", leave=False)
+
+            # Iterate through the arrays already saved in memory
+            for batch_preds, batch_targets in hd95_loop:
+                for i in range(batch_preds.shape[0]):
+                    p = batch_preds[i].squeeze()
+                    t = batch_targets[i].squeeze()
+                    if p.max() > 0 and t.max() > 0:
+                        score = hd95(p, t)
+                        hd95_scores.append(score)
+                        # Dynamically update the progress bar text to show the latest score
+                        hd95_loop.set_postfix(hd95=f"{score:.2f} px")
                         
             avg_hd95 = np.mean(hd95_scores) if len(hd95_scores) > 0 else float('nan')
             print(f"*** Best Model Saved ({loss_type}: {best_loss:.4f}) | HD95: {avg_hd95:.2f} px ***")
