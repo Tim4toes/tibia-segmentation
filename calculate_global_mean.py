@@ -47,5 +47,5 @@ def calculate_global_stats(image_dir):
 
 if __name__ == "__main__":
     # Point this to the main folder containing all your training images
-    training_directory = "data/all_datasets/images"
+    training_directory = "data/macro_tibia/images"
     calculate_global_stats(training_directory)
