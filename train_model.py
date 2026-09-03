@@ -2,6 +2,7 @@
 # It includes a custom Dataset class that handles subfolder structures, applies textural augmentations, and saves the trained model for later inference.
 # It includes GPU-accelerated overlap metrics (DSC, IoU, Sens, Prec) every epoch,
 # and calculates CPU-intensive HD95 strictly when a new best model is saved.
+# OPTIMIZED FOR: 16GB System RAM and 24GB VRAM (RTX 3090).
 
 import os
 import cv2
@@ -121,7 +122,7 @@ class BoneDataset(Dataset):
                 
         # Binarize mask for Tissue Volume envelope (0 = background, 1 = bone ROI)
         # --- RAM OPTIMIZATION FIX ---
-        # Keep mask as an 8-bit integer (uint8) in system RAM to reduce worker queue size by 75%.
+        # Keep mask as an 8-bit integer (uint8) in system RAM to reduce worker queue size by 75%; in CPU queue to prevent IPC memory bloat.
         mask = (mask > 127).astype(np.uint8)
 
         if self.transform:
@@ -298,7 +299,7 @@ def calculate_metrics(pred_logits, true_masks):
     sensitivity = TP / (TP + FN + 1e-6)
     precision = TP / (TP + FP + 1e-6)
             
-    return dsc.item(), iou.item(), sensitivity.item(), precision.item(), batch_hd95
+    return dsc.item(), iou.item(), sensitivity.item(), precision.item()
 
 # =============================================================================
 # --- 7. MAIN TRAINING LOOP ---
@@ -428,10 +429,12 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
                 val_metrics["iou"] += iou
                 val_metrics["sens"] += sens
                 val_metrics["prec"] += prec
-                
+
                 # Cache arrays for HD95 to eliminate double GPU pass; store lightweight binary arrays in CPU RAM
-                stored_preds.append((torch.sigmoid(predictions) > 0.5).cpu().numpy())
-                stored_targets.append(targets.cpu().numpy())
+                # CRITICAL RAM FIX: Force binary predictions and targets down to 8-bit integers 
+                # immediately on the GPU before moving them to the CPU. Cuts cache memory by 75%.
+                stored_preds.append((torch.sigmoid(predictions) > 0.5).to(torch.uint8).cpu().numpy())
+                stored_targets.append(targets.to(torch.uint8).cpu().numpy())
                 
         if len(val_loader) > 0:
             avg_val_loss = val_loss / len(val_loader)
@@ -451,7 +454,7 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
             current_eval_loss = avg_train_loss
             loss_type = "Train Loss"
         
-        # --- BEST MODEL CHECKPOINT/SAVING ---
+        # --- BEST MODEL CHECKPOINT/HD95 COMPUTATION/SAVING ---
         if current_eval_loss < best_loss:
             best_loss = current_eval_loss
 
