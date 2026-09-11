@@ -12,12 +12,12 @@ To run the segmentation scripts optimally, it is highly recommended to use a Pyt
 ## 1. Create a Virtual Environment
 Open your terminal or command prompt, navigate to the project folder, and run:
 ```bash
-python -m venv venv
+python -m venv .venv
 ```
 ## 2. Activate the virtual environment
 Windows: 
 ```bash
-venv\Scripts\activate
+.venv\Scripts\Activate.ps1
 ```
 ## 3. Install standard dependencies
 ```bash
@@ -135,6 +135,8 @@ Then, visit the PyTorch Get Started page to generate the specific installation c
 A typical command for Windows with CUDA 11.8 or 12.1 looks like this:
 
 pip install torch torchvision torchaudio --index-url [https://download.pytorch.org/whl/cu121](https://download.pytorch.org/whl/cu121)
+
+To find Cuda version, run nvidia-smi into Wndows cmd
 
 ## Portable Git
 Download and install portable Git

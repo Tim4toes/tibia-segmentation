@@ -2,7 +2,7 @@
 # It includes a custom Dataset class that handles subfolder structures, applies textural augmentations, and saves the trained model for later inference.
 # It includes GPU-accelerated overlap metrics (DSC, IoU, Sens, Prec) every epoch,
 # and calculates CPU-intensive HD95 strictly when a new best model is saved.
-# OPTIMIZED FOR: 16GB System RAM and 24GB VRAM (RTX 3090).
+# OPTIMIZED FOR: 32GB System RAM, 24GB VRAM (NVIDIA RTX 4090) and Intel i7-14700K.
 
 import os
 import cv2
@@ -365,8 +365,8 @@ def train_model(run_mode, epochs, model_path, images_base, masks_base, csv_path)
     # --- RAM OPTIMIZATION FIX ---
     # Kept num_workers low for system stability, but explicitly restricted prefetch_factor to 2.
     # This prevents the CPU from aggressively caching too many batches ahead of time, saving RAM.
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True, prefetch_factor=2)
-    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=1, pin_memory=True, persistent_workers=True, prefetch_factor=2)
+    train_loader = DataLoader(train_dataset, batch_size=5, shuffle=True, num_workers=10, pin_memory=True, persistent_workers=True, prefetch_factor=3)
+    val_loader = DataLoader(val_dataset, batch_size=5, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True, prefetch_factor=3)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = BCEDiceLoss() 
