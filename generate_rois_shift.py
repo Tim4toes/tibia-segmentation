@@ -211,16 +211,23 @@ def generate_rois(model_weights_path, input_dir, output_dir):
             cleaned_volume = (dilated_core & volume_3d).astype(np.uint8) * 255
             cleanup_pbar.update(1)
 
-        # Step 5C: Unpack and Save Back to 2D
+        # Step 5C: Unpack, fill and Save Back to 2D
         for z in tqdm(range(cleaned_volume.shape[0]), desc="Saving Cleaned Slices", leave=False):
             slice_2d = cleaned_volume[z]
+            
+            # --- Fill Cavities ---
+            # Convert the slice to boolean, fill all enclosed holes, and cast back to 8-bit
+            slice_boolean = slice_2d > 0
+            filled_slice = ndimage.binary_fill_holes(slice_boolean)
+            slice_2d = filled_slice.astype(np.uint8) * 255
+            
             orig_width, orig_height = original_shapes[z]
             
             # Resize back to native CT Analyser dimensions using nearest neighbor
             final_roi = cv2.resize(slice_2d, (orig_width, orig_height), interpolation=cv2.INTER_NEAREST)
             
             # 2D Median blur to smooth jagged edges without creating gray pixels
-            # final_roi = cv2.medianBlur(final_roi, 3)
+            final_roi = cv2.medianBlur(final_roi, 3)
             
             # Save strictly as 1-bit monochrome
             Image.fromarray(final_roi).convert('1').save(str(out_paths[z]))
@@ -270,18 +277,18 @@ if __name__ == "__main__":
     # 1. Establish the default baseline paths based on the chosen target
     if args.target == "tibia":
         model_weights_path = "checkpoints/tibia_unet.pth"
-        default_input = "data/inference/input_tibia"
-        default_output = "data/inference/output_tibia"
+        default_input = "data/inference/input_tibia_macro"
+        default_output = "data/inference/output_tibia_macro"
         
     elif args.target == "cortical":
-        model_weights_path = "checkpoints/cortical_unet.pth"
-        default_input = "data/inference/input_tibia_voi" 
-        default_output = "data/inference/output_tibia_cortical" 
+        model_weights_path = "checkpoints/tibia_cort_unet.pth"
+        default_input = "data/inference/input_tibia_cort" 
+        default_output = "data/inference/output_tibia_cort" 
         
     elif args.target == "trabecular":
-        model_weights_path = "checkpoints/trabecular_unet.pth"
-        default_input = "data/inference/input_tibia_voi"       
-        default_output = "data/inference/output_tibia_trabecular" 
+        model_weights_path = "checkpoints/tibia_trab_unet.pth"
+        default_input = "data/inference/input_tibia_trab"       
+        default_output = "data/inference/output_tibia_trab" 
 
     # 2. Override defaults if external paths were provided in the terminal
     input_dir = args.input if args.input else default_input
