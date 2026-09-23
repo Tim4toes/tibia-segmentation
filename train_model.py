@@ -545,13 +545,13 @@ if __name__ == "__main__":
         csv_path = "logs/metrics_tibia_macro.csv"
         
     elif args.target == "cortical":
-        model_path = "checkpoints/cortical_unet.pth"
-        images_base = "data/tibia_voi/images"
-        masks_base = "data/tibia_voi/masks"
+        model_path = "checkpoints/tibia_cort_unet.pth"
+        images_base = "data/tibia_cort/images"
+        masks_base = "data/tibia_cort/masks"
         csv_path = "logs/metrics_tibia_cortical.csv"
         
     elif args.target == "trabecular":
-        model_path = "checkpoints/trabecular_unet.pth"
+        model_path = "checkpoints/tibia_trab_unet.pth"
         images_base = "data/tibia_trab/images"
         masks_base = "data/tibia_trab/masks"
         csv_path = "logs/metrics_tibia_trabecular.csv"
