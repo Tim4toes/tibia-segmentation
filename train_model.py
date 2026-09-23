@@ -540,21 +540,21 @@ if __name__ == "__main__":
     
     if args.target == "tibia":
         model_path = "checkpoints/tibia_unet.pth"
-        images_base = "data/macro_tibia/images"
-        masks_base = "data/macro_tibia/masks"
-        csv_path = "logs/metrics_tibia.csv"
+        images_base = "data/tibia_macro/images"
+        masks_base = "data/tibia_macro/masks"
+        csv_path = "logs/metrics_tibia_macro.csv"
         
     elif args.target == "cortical":
         model_path = "checkpoints/cortical_unet.pth"
         images_base = "data/tibia_voi/images"
-        masks_base = "data/tibia_voi/masks_cortical"
-        csv_path = "logs/metrics_cortical.csv"
+        masks_base = "data/tibia_voi/masks"
+        csv_path = "logs/metrics_tibia_cortical.csv"
         
     elif args.target == "trabecular":
         model_path = "checkpoints/trabecular_unet.pth"
-        images_base = "data/tibia_voi/images"
-        masks_base = "data/tibia_voi/masks_trabecular"
-        csv_path = "logs/metrics_trabecular.csv"
+        images_base = "data/tibia_trab/images"
+        masks_base = "data/tibia_trab/masks"
+        csv_path = "logs/metrics_tibia_trabecular.csv"
 
     print(f"--- INITIALIZING PIPELINE ---")
     print(f"Target: {args.target.upper()}")
