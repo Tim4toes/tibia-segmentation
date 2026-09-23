@@ -176,29 +176,39 @@ def generate_rois(model_weights_path, input_dir, output_dir):
                 out_paths.append(out_path)
     
         # Step 5B: 3D Stack and Connected Component Analysis
-        with tqdm(total=3, desc="3D Morphological Cleanup", leave=False) as cleanup_pbar:
+        # Wrapped in a 4-step manual progress bar
+        with tqdm(total=4, desc="3D Morphological Cleanup", leave=False) as cleanup_pbar:
             
-            # 1. Stack 2D lists into a contiguous 3D NumPy array (Z, Y, X)
+            # 1. Stack 2D lists into a contiguous 3D boolean array (Saves RAM)
             cleanup_pbar.set_postfix(step="Stacking Arrays")
-            volume_3d = np.stack(volume_predictions)
+            volume_3d = np.stack(volume_predictions).astype(bool)
             cleanup_pbar.update(1)
             
             # 2. Sever weak 1-voxel bridges between the tibia and fibula
             cleanup_pbar.set_postfix(step="Opening Filter")
             struct_element = np.ones((3, 3, 3), dtype=bool)
-            volume_3d = ndimage.binary_opening(volume_3d, structure=struct_element)
+            opened_volume = ndimage.binary_opening(volume_3d, structure=struct_element)
             cleanup_pbar.update(1)
             
-            # 3. Label all distinct 3D islands (Connectivity 1 ensures diagonal touches don't link)
+            # 3. Label all distinct 3D islands and isolate the "Core Tibia"
             cleanup_pbar.set_postfix(step="Isolating Volume")
-            labels = measure.label(volume_3d, connectivity=1)
+            labels = measure.label(opened_volume, connectivity=1)
             
             if labels.max() > 0:
-                # Find the largest physical object (ignoring the 0 background class)
                 largest_cc_id = np.argmax(np.bincount(labels.flat)[1:]) + 1
-                cleaned_volume = (labels == largest_cc_id).astype(np.uint8) * 255
+                core_tibia = (labels == largest_cc_id)
             else:
-                cleaned_volume = volume_3d.astype(np.uint8) * 255
+                core_tibia = opened_volume
+            cleanup_pbar.update(1)
+
+            # 4. RESTORE PRISTINE BOUNDARIES: Masked Dilation
+            cleanup_pbar.set_postfix(step="Restoring Boundaries")
+            # Dilate the isolated core to push the eroded edges back out
+            dilated_core = ndimage.binary_dilation(core_tibia, structure=struct_element)
+            
+            # Bitwise AND (&): Keep the dilated pixels ONLY if they existed in the AI's original raw prediction.
+            # This perfectly snaps the edges back to the exact un-eroded boundaries while leaving the fibula dead.
+            cleaned_volume = (dilated_core & volume_3d).astype(np.uint8) * 255
             cleanup_pbar.update(1)
 
         # Step 5C: Unpack and Save Back to 2D
